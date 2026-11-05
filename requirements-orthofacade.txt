@@ -1,0 +1,26 @@
+# 本輪 Python 3.12 實測版本；僅貼皮／校準工具需要，PHP 網站不需要。
+Pygments==2.21.0
+certifi==2026.10.23
+charset-normalizer==3.5.2
+colorama==0.4.6
+contourpy==1.4.0
+cycler==0.12.1
+fonttools==4.68.0
+idna==3.20
+iniconfig==2.3.1
+kiwisolver==1.5.1
+matplotlib==3.11.2
+numpy==2.5.4
+opencv-python-headless==5.0.0.93
+packaging==26.3
+pillow==13.0.0
+pluggy==1.7.0
+pyparsing==3.3.3
+pyproj==3.8.0
+pytest==9.2.0
+python-dateutil==4.0.0
+requests==2.34.2
+scipy==1.18.1
+shapely==2.2.0
+tzdata==2026.6
+urllib3==2.8.0

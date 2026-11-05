@@ -1,0 +1,132 @@
+{
+  "status": "manual_calibration_diagnostic_only",
+  "pano_id": "1709407170479969",
+  "wall_key": "w9778285733713_3",
+  "source_image_sha256": "097fde62a10c7fe9d229af7635a36b3529fccdd593abf60f08fba86ce58c2707",
+  "controls": [
+    {
+      "roof_pixel": [
+        378,
+        1424
+      ],
+      "foot_pixel": [
+        370,
+        1606
+      ],
+      "assumed_height_m": 2.97,
+      "ray_lengths_m": [
+        15.767891534581189,
+        15.824594028239039
+      ],
+      "roof_ray": [
+        -0.25721854805282346,
+        -0.9634343401603906,
+        0.07505258647981422
+      ],
+      "foot_ray": [
+        -0.2561437317815411,
+        -0.9600230526312153,
+        -0.1128987470509242
+      ],
+      "horizontal_displacement_m": [
+        -4.054582367350209,
+        -15.191651620989791
+      ],
+      "horizontal_distance_m": 15.723419384699659,
+      "camera_height_above_foot_m": 1.786576838377725,
+      "vertical_segment_fit_error_m": 0.0025084452960511833,
+      "id": "A",
+      "normal_distance_m": 10.590340540862984,
+      "foot_z": 1.0036797820069603,
+      "semantics": "roof fascia to visible foot/step; not a verified official corner",
+      "pixel_y_plus_minus_3_sensitivity": {
+        "normal_distance_m": [
+          10.250935562628197,
+          10.95272274431573
+        ],
+        "camera_height_m": [
+          1.7374536135802157,
+          1.8356884898217212
+        ]
+      }
+    },
+    {
+      "roof_pixel": [
+        422,
+        1432
+      ],
+      "foot_pixel": [
+        415,
+        1601
+      ],
+      "assumed_height_m": 2.97,
+      "ray_lengths_m": [
+        16.982122704841657,
+        17.037446510214206
+      ],
+      "roof_ray": [
+        -0.30110116124121683,
+        -0.9511080522773917,
+        0.06878636196439482
+      ],
+      "foot_ray": [
+        -0.300576771771261,
+        -0.9478760120659012,
+        -0.10575760030187263
+      ],
+      "horizontal_displacement_m": [
+        -5.11719876901719,
+        -16.150610251612783
+      ],
+      "horizontal_distance_m": 16.94189879385221,
+      "camera_height_above_foot_m": 1.8018394581917687,
+      "vertical_segment_fit_error_m": 0.00810212641238955,
+      "id": "B",
+      "normal_distance_m": 10.822863602886784,
+      "foot_z": 0.9884171621929165,
+      "semantics": "roof fascia to visible foot/step; not a verified official corner",
+      "pixel_y_plus_minus_3_sensitivity": {
+        "normal_distance_m": [
+          10.450414675480886,
+          11.222565341093292
+        ],
+        "camera_height_m": [
+          1.7489759909312617,
+          1.8546907569208588
+        ]
+      }
+    }
+  ],
+  "current": {
+    "camera_C": [
+      1.8145698251182463,
+      10.69245508305892,
+      2.7902566203846852
+    ],
+    "z_base": 0.4839865825362839,
+    "effective_camera_height_m": 2.3062700378484013,
+    "normal_distance_to_render_plane_m": 4.512646469302392
+  },
+  "calibrated_proof": {
+    "camera_C": [
+      -1.5330671605522297,
+      15.903828473904202,
+      2.7902566203846852
+    ],
+    "z_base": 0.9960484720999383,
+    "camera_height_m": 1.794208148284747,
+    "normal_distance_m": 10.706602071874883,
+    "normal_camera_translation_m": 6.193955602572491
+  },
+  "limitations": [
+    "Pixel coordinates refer to unchanged 6080x3040 source.jpg; origin upper-left.",
+    "The official 2.97m height is tentatively equated to visible front roof fascia-to-foot/step height; not surveyed.",
+    "Controls are not verified official footprint corners. Along-wall translation is unresolved.",
+    "The photographed facade has not been confirmed to belong to the supplied build_id."
+  ],
+  "runtime": {
+    "numpy": "2.5.4",
+    "pillow": "13.0.0",
+    "opencv": "5.0.0"
+  }
+}

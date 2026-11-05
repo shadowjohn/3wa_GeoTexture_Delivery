@@ -1,0 +1,9 @@
+# SQLite、journal、WAL 與暫存成果皆不可透過 HTTP 存取。
+Options -Indexes
+<IfModule mod_authz_core.c>
+    Require all denied
+</IfModule>
+<IfModule !mod_authz_core.c>
+    Order allow,deny
+    Deny from all
+</IfModule>

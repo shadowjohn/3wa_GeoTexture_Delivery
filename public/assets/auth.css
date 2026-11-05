@@ -1,0 +1,15 @@
+.auth-page{min-height:100dvh;display:flex;align-items:center;justify-content:center;padding:36px 20px;background:#f4f8f8}
+.auth-card{width:100%;max-width:460px;background:#fff;border:1px solid var(--line);border-radius:12px;padding:34px 36px;box-shadow:0 10px 36px #133d4310}
+.auth-brand{display:flex;align-items:center;gap:12px;color:var(--teal);font-size:19px;font-weight:750;text-decoration:none;margin-bottom:34px}
+.auth-brand small{display:block;font-size:12px;letter-spacing:1px;color:var(--muted);font-weight:400;margin-top:5px}
+.auth-mark{display:grid;place-items:center;width:43px;height:43px;border-radius:10px;background:var(--teal);color:#fff;font-size:27px;font-weight:600;flex-shrink:0}
+.auth-card h1{font-size:25px;margin:0 0 10px;color:#253238;letter-spacing:-.5px}
+.auth-intro{font-size:13px;line-height:1.75;color:var(--muted);margin:0 0 25px}
+.auth-field{margin:0 0 19px}.auth-field label span{font-size:11px;font-weight:400;color:var(--muted);margin-left:5px}
+.auth-field input[type=password],.auth-field input[type=text]{display:block;width:100%;height:43px;padding:9px 11px;border:1px solid #bdcbd3;border-radius:5px;background:#fff;color:#253238;font:inherit}
+.captcha-row{display:flex;align-items:center;gap:10px}.captcha-row>input{min-width:0;flex:1;letter-spacing:1px}
+.captcha-button{border:1px solid #d4e2e3;padding:0;border-radius:5px;flex-shrink:0;line-height:0;overflow:hidden}.captcha-button img{display:block;width:171px;height:54px}
+.auth-help{font-size:11px;line-height:1.7;color:var(--muted);margin:6px 0 0}.auth-footnote{font-size:11px;color:var(--muted);line-height:1.9;border-top:1px solid var(--line);padding-top:18px;margin:24px 0 0}
+.auth-alert{font-size:12px;line-height:1.8;padding:11px 13px;margin:0 0 20px;border-radius:5px}.auth-alert.error{color:#a22d35;background:#fff2f2;border:1px solid #eed4d6}.auth-alert.success{color:#08746f;background:#eaf7f5;border:1px solid #c2e4df}
+.auth-title-row{display:flex;justify-content:space-between;align-items:center;gap:12px}.auth-title-row>a{font-size:12px;color:var(--teal);text-decoration:none}.auth-title-row>a:hover{text-decoration:underline}.auth-logout{text-align:center;margin-top:20px}
+@media(max-width:480px){.auth-page{padding:20px 14px}.auth-card{padding:28px 23px}.auth-brand{font-size:17px;margin-bottom:28px}.captcha-button img{width:143px;height:45px}.auth-title-row{align-items:baseline}.auth-title-row>a{font-size:11px}}

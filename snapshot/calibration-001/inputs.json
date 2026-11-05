@@ -1,0 +1,433 @@
+{
+  "version": 1,
+  "status": "diagnostic_only_unverified_corner",
+  "source_image": {
+    "file": "source.jpg",
+    "id": "1709407170479969",
+    "width": 6080,
+    "height": 3040,
+    "sha256": "097fde62a10c7fe9d229af7635a36b3529fccdd593abf60f08fba86ce58c2707",
+    "projection": "equirectangular",
+    "source_type": "mapillary_photo"
+  },
+  "attribution_file": "attribution.json",
+  "provenance": {
+    "source_key": "new-taipei-8418",
+    "build_id": "2R8HS7FQLB",
+    "source_hash": "703fc002001946fc8c7405ecd43857d42d8701cb2955667db3605e0e3764dadc",
+    "recipe_key": "texture-v1",
+    "engine_commit": "a24e4ca349a1ceecec5c64517e62b6828f4aebac",
+    "imagery_hash": "2ea4f200e5c1512cec958d4b2379b51b97b920a54bf252b9698f5496a7334d8d"
+  },
+  "feature": {
+    "type": "Feature",
+    "id": "2R8HS7FQLB",
+    "geometry": {
+      "type": "Polygon",
+      "coordinates": [
+        [
+          [
+            121.4217352402484,
+            25.17904859658889
+          ],
+          [
+            121.4217152341252,
+            25.17907307433695
+          ],
+          [
+            121.4217167652114,
+            25.17907401791084
+          ],
+          [
+            121.4217803571274,
+            25.17911093261001
+          ],
+          [
+            121.4218059346739,
+            25.17907367338928
+          ],
+          [
+            121.4217929169188,
+            25.1790675173084
+          ],
+          [
+            121.4218076761336,
+            25.1790492116002
+          ],
+          [
+            121.4217629638897,
+            25.1790151410682
+          ],
+          [
+            121.4217378067125,
+            25.17905058445738
+          ],
+          [
+            121.4217352402484,
+            25.17904859658889
+          ]
+        ]
+      ]
+    },
+    "properties": {
+      "build_id": "2R8HS7FQLB",
+      "name": "",
+      "height": 2.97,
+      "height_missing": false,
+      "source_hash": "703fc002001946fc8c7405ecd43857d42d8701cb2955667db3605e0e3764dadc",
+      "source_key": "new-taipei-8418",
+      "recipe_key": "texture-v1"
+    }
+  },
+  "frame": {
+    "lon0": 121.4217614551294,
+    "lat0": 25.179063036839104,
+    "radius_m": 6371000.0,
+    "axes": "ENU: X east, Y north, Z up; metres"
+  },
+  "wall": {
+    "key": "w9778285733713_3",
+    "a": [
+      1.902098071023735,
+      5.3257667323566675
+    ],
+    "b": [
+      -4.651195228428172,
+      1.1161188369036483
+    ],
+    "normal": [
+      -0.5404683534186338,
+      0.8413643437613404
+    ],
+    "length_m": 7.7888887828966515,
+    "source_edges": [
+      {
+        "polygon": 0,
+        "ring": 0,
+        "edge": 2,
+        "a_lonlat": [
+          121.4217167652114,
+          25.17907401791084
+        ],
+        "b_lonlat": [
+          121.4217803571274,
+          25.17911093261001
+        ],
+        "reversed": true,
+        "s0": 0.0,
+        "s1": 7.602551483614414
+      },
+      {
+        "polygon": 0,
+        "ring": 0,
+        "edge": 1,
+        "a_lonlat": [
+          121.4217152341252,
+          25.17907307433695
+        ],
+        "b_lonlat": [
+          121.4217167652114,
+          25.17907401791084
+        ],
+        "reversed": true,
+        "s0": 7.602551483614414,
+        "s1": 7.788888782896653
+      }
+    ]
+  },
+  "cameras": {
+    "raw": {
+      "pano_id": "1709407170479969",
+      "C": [
+        9.814569825118246,
+        16.94245508305892,
+        2.7902566203846852
+      ],
+      "axes": [
+        [
+          0.991534545647122,
+          0.12617258727481134,
+          -0.030654901871242778
+        ],
+        [
+          -0.03525791885095213,
+          0.034411349649486486,
+          -0.9987856317416668
+        ],
+        [
+          -0.12496449074299101,
+          0.9914112856104074,
+          0.038568624783157805
+        ]
+      ],
+      "pose_source": "sfm",
+      "roll_deg": 1.757980131319681,
+      "pitch_deg": 2.2103676541222455,
+      "ground_z": 0.29025662038468525,
+      "cam_height_m": 2.5,
+      "ground_source": "default",
+      "cluster_id": "1869858460378193",
+      "shot_id": "aPKOhBedNklvMmgfDr57nG",
+      "reg": null,
+      "compass_deg": 352.8159213838,
+      "pose_factor": 1.0,
+      "width": 6080,
+      "height": 3040
+    },
+    "global": {
+      "pano_id": "1709407170479969",
+      "C": [
+        1.8145698251182463,
+        10.69245508305892,
+        2.7902566203846852
+      ],
+      "axes": [
+        [
+          0.991534545647122,
+          0.12617258727481134,
+          -0.030654901871242778
+        ],
+        [
+          -0.03525791885095213,
+          0.034411349649486486,
+          -0.9987856317416668
+        ],
+        [
+          -0.12496449074299101,
+          0.9914112856104074,
+          0.038568624783157805
+        ]
+      ],
+      "pose_source": "sfm",
+      "roll_deg": 1.757980131319681,
+      "pitch_deg": 2.2103676541222455,
+      "ground_z": 0.29025662038468525,
+      "cam_height_m": 2.5,
+      "ground_source": "default",
+      "cluster_id": "1869858460378193",
+      "shot_id": "aPKOhBedNklvMmgfDr57nG",
+      "reg": {
+        "pano_id": "1709407170479969",
+        "dx": -8.0,
+        "dy": -6.25,
+        "theta_deg": 0.0,
+        "inliers_before": 0.0,
+        "inliers_after": 0.0,
+        "ambiguity_ratio": 0.0,
+        "radius_agreement_m": 0.0,
+        "n_points": 75,
+        "accepted": true,
+        "source": "global",
+        "scale_suspect": false,
+        "second_best": null
+      },
+      "compass_deg": 352.8159213838,
+      "pose_factor": 1.0,
+      "width": 6080,
+      "height": 3040
+    }
+  },
+  "projection": {
+    "s_l": -0.10555560855167423,
+    "s_r": 7.894444391448326,
+    "official_height_m": 2.97,
+    "current_z_base": 0.4839865825362839,
+    "epsilon_m": 0.05,
+    "pixels_per_meter": 96,
+    "valid_v_range": [
+      0.05,
+      0.78
+    ]
+  },
+  "refinement_evidence": {
+    "raw_ground_z": 0.29025662038468525,
+    "ground_dz": 0.19372996215159866,
+    "height_used_m": 4.449789322496617,
+    "actual_render_height_m": 4.0,
+    "ground_source": "default",
+    "ground_points_2_5_to_8_m": 0
+  },
+  "sfm_summary": {
+    "cluster_id": "1869858460378193",
+    "cluster_reference_lla": [
+      121.41952759999982,
+      25.181688196428528,
+      0.0
+    ],
+    "point_count": 3148,
+    "shot_count": 14,
+    "atomic_scale": 0.94877904881688,
+    "metric_ratio": 1.0000000045814734,
+    "metric_scale_ok": true,
+    "graph_computed_altitude": 2.8004946438596,
+    "raw_shot_z": 2.7902566203846852,
+    "ground_annuli": [
+      {
+        "outer_radius_m": 8,
+        "below_camera_points": 0,
+        "z_percentiles": []
+      },
+      {
+        "outer_radius_m": 12,
+        "below_camera_points": 0,
+        "z_percentiles": []
+      },
+      {
+        "outer_radius_m": 16,
+        "below_camera_points": 4,
+        "z_percentiles": [
+          1.4577952633307705,
+          1.54388842795825,
+          1.8882610864681684,
+          2.1034831051006213,
+          2.301821209723617,
+          2.605672474610838,
+          2.6816352908326433
+        ]
+      },
+      {
+        "outer_radius_m": 20,
+        "below_camera_points": 11,
+        "z_percentiles": [
+          1.1269183404645675,
+          1.1269183409856147,
+          1.342270488211478,
+          2.0317496941806343,
+          2.1012668265199945,
+          2.428425903426626,
+          2.6816352908326433
+        ]
+      },
+      {
+        "outer_radius_m": 25,
+        "below_camera_points": 13,
+        "z_percentiles": [
+          1.1269183404645675,
+          1.1269183410898242,
+          1.4577952633307705,
+          2.047868862272959,
+          2.1146923483931683,
+          2.3777840259454215,
+          2.6816352908326433
+        ]
+      },
+      {
+        "outer_radius_m": 30,
+        "below_camera_points": 13,
+        "z_percentiles": [
+          1.1269183404645675,
+          1.1269183410898242,
+          1.4577952633307705,
+          2.047868862272959,
+          2.1146923483931683,
+          2.3777840259454215,
+          2.6816352908326433
+        ]
+      },
+      {
+        "outer_radius_m": 40,
+        "below_camera_points": 18,
+        "z_percentiles": [
+          1.1269183404645675,
+          1.1269183413503479,
+          1.329541680689975,
+          2.0398092782267967,
+          2.143052616343073,
+          2.5655507519413074,
+          2.6816352908326433
+        ]
+      },
+      {
+        "outer_radius_m": 60,
+        "below_camera_points": 23,
+        "z_percentiles": [
+          -11.73651121418155,
+          1.0742776170442707,
+          1.2867904856715247,
+          2.047868862272959,
+          2.232226765919881,
+          2.54203700315155,
+          2.6816352908326433
+        ]
+      }
+    ]
+  },
+  "engine_quality": {
+    "registration": {
+      "panos": 5,
+      "with_cluster": 5,
+      "local": 0,
+      "global": 5,
+      "none": 0,
+      "no_cluster": 0,
+      "acceptance_rate_local": 0.0,
+      "acceptance_rate_any": 1.0,
+      "median_shift_m": 10.151970252123476,
+      "median_inliers_after": 0.0,
+      "median_inliers_before": 0.0,
+      "theta_used": 0,
+      "local_rejection_reasons": {
+        "only": 5
+      }
+    },
+    "ground_sources": {
+      "default": 5
+    },
+    "plane_sources": {
+      "cloud": 0,
+      "osm-registered": 1,
+      "osm-raw": 4
+    },
+    "warnings": [
+      "GLOBAL_REGISTRATION",
+      "NO_CLOUD_PLANE",
+      "SINGLE_VIEW",
+      "DEFAULT_CAMERA_HEIGHT",
+      "UNVERIFIED"
+    ]
+  },
+  "controls": [
+    {
+      "id": "A",
+      "roof_pixel": [
+        378,
+        1424
+      ],
+      "foot_pixel": [
+        370,
+        1606
+      ]
+    },
+    {
+      "id": "B",
+      "roof_pixel": [
+        422,
+        1432
+      ],
+      "foot_pixel": [
+        415,
+        1601
+      ]
+    }
+  ],
+  "control_assumptions": [
+    "Pixel coordinates refer to unchanged 6080x3040 source.jpg; origin upper-left.",
+    "The official 2.97m height is tentatively equated to visible front roof fascia-to-foot/step height; not surveyed.",
+    "Controls are not verified official footprint corners. Along-wall translation is unresolved.",
+    "The photographed facade has not been confirmed to belong to the supplied build_id."
+  ],
+  "proof_control_crop": [
+    220,
+    1370,
+    520,
+    1640
+  ],
+  "geometry_source": {
+    "source_type": "user_supplied_sqlite",
+    "original_filename": "F_新北建物8418.db",
+    "package_field": "inputs.json#/feature",
+    "build_id": "2R8HS7FQLB",
+    "license_status": "not_verified",
+    "note": "Only this feature is included; the source database is not bundled and no reuse license is asserted."
+  }
+}

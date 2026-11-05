@@ -1,0 +1,15 @@
+/var/
+/vendor/orthofacade/
+/.venv-orthofacade/
+/.venv-calibration/
+__pycache__/
+/db/*
+!/db/.htaccess
+!/db/web.config
+/data/
+*.db
+*.sqlite
+*.sqlite-*
+*.zip
+.env
+.superpowers/

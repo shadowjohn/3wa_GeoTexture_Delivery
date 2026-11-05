@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "image_id": "1709407170479969",
+  "author": {
+    "username": "irvinfly",
+    "id": "103375265539501"
+  },
+  "source_url": "https://www.mapillary.com/app/?pKey=1709407170479969",
+  "license": "CC-BY-SA-4.0",
+  "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+  "original_file": "source.jpg",
+  "original_sha256": "097fde62a10c7fe9d229af7635a36b3529fccdd593abf60f08fba86ce58c2707",
+  "changes": {
+    "source.jpg": "原始下載JPEG逐位元保留，未裁切、重編碼或改寫metadata。",
+    "proof-comparison.png": "從原始全景依相機射線重新投影；比較預設地面、人工高度與人工距離/高度假設；附診斷文字。",
+    "control-pixels.png": "僅放大原圖控制點區域並標示人工像素點，未作為正式貼皮成果。"
+  },
+  "source_type": "mapillary_photo",
+  "filename": "source.jpg",
+  "creator": {
+    "username": "irvinfly",
+    "id": "103375265539501"
+  },
+  "license_scope": [
+    "source.jpg",
+    "proof-comparison.png",
+    "control-pixels.png"
+  ],
+  "geometry_license_note": "The supplied official feature in inputs.json has an unverified source license; this photo license is not asserted for that geometry."
+}
