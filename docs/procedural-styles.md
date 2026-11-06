@@ -21,6 +21,8 @@ python3 -m venv .venv-procedural
 
 PHP 需允許 `proc_open`。worker 優先用 `GEOTEXTURE_PYTHON`，未指定時採專案 `.venv-procedural/bin/python`，再退回 `python3`。檔案鎖、來源版本、取消狀態及私有成果存取沿用原有任務系統。缺失或損壞的程序化模型會重新排隊；高度缺值或無效輪廓會失敗，不會補假高度。
 
+worker 每批以 `python -u -m pipeline.procedural --batch` 共用一個行程，一次只送一棟 NDJSON（含 `request` 與絕對路徑 `output_path`，上限 8 MiB），產生模型和 manifest 後立即收到 `{"ok":true}`。有效的單棟失敗回應不會中斷其餘建物；通訊錯誤或 20 秒逾時會回收子程序，下一棟重新啟動。舊單檔 CLI 保留。PHP 負責任務、取消及成果驗證；Python 不直接更新 SQLite。
+
 進度 API `GET api.php?action=progress` 需登入，只回傳各任務的資料庫計數、狀態及 worker 鎖狀態，不掃描模型檔或傳回完整幾何。頁面隱藏時暫停輪詢，避免重疊請求；網路錯誤保留上次進度並自動重試。地圖成果更新最多每 15 秒一次，建物明細按「更新建物清單」取得。
 
 ## 新增風格
@@ -44,7 +46,8 @@ PHP 需允許 `proc_open`。worker 優先用 `GEOTEXTURE_PYTHON`，未指定時�
 
 ```sh
 php tests/procedural.php
-.venv-procedural/bin/python -m pytest tests/test_procedural.py tests/test_http_procedural.py tests/test_glb_export.py -q
+php tests/batch-worker.php
+.venv-procedural/bin/python -m pytest tests/test_procedural.py tests/test_procedural_batch.py tests/test_http_procedural.py tests/test_glb_export.py -q
 node tests/frontend.mjs
 node tests/map-preview.mjs
 ```

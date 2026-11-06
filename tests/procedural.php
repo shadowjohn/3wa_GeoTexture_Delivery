@@ -54,10 +54,10 @@ try {
     $input=array_intersect_key($item,array_flip(['source_key','build_id','source_hash','recipe_key']));
     $input['path']='models/'.$model['asset_id'].'.glb';
     rejected(fn()=>$tw->registerResult($input));
-    $inputPath=null;
-    foreach (glob($tmp.'/state/inputs/*.json') as $candidate) {
-        if (json_decode(file_get_contents($candidate),true)['recipe_key']==='procedural-tw-v1') { $inputPath=$candidate; break; }
-    }
+    $state=new PDO('sqlite:'.$tmp.'/state/app.sqlite');
+    $frozen=$state->query("SELECT source_key,build_id,source_hash,recipe_key,feature_json FROM job_items WHERE recipe_key='procedural-tw-v1' LIMIT 1")->fetch(PDO::FETCH_ASSOC);
+    $frozen['feature']=json_decode($frozen['feature_json'],true); unset($frozen['feature_json']);
+    $inputPath=$tmp.'/legacy-input.json'; file_put_contents($inputPath,json_encode($frozen));
     $output=$tmp.'/state/artifacts/validation.glb';
     $python=dirname(__DIR__).'/.venv-procedural/bin/python';
     GeoTexture\ProceduralRunner::generate($inputPath,$output,is_executable($python)?$python:'python3');

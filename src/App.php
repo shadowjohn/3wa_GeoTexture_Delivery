@@ -175,14 +175,7 @@ final class App {
                 $items[] = ['build_id'=>$row['build_id'],'source_key'=>$row['source_key'],'source_hash'=>$row['source_hash'],'recipe_key'=>$row['recipe_key'],'name'=>$feature['properties']['name'] ?? $row['build_id'],'height'=>$feature['properties']['height'] ?? null,'height_missing'=>$feature['properties']['height_missing'] ?? true,'status'=>$status,'error'=>$row['error'],'model'=>$asset ? $this->model($asset) : null];
             }
         }
-        $status = $job['status'];
-        if ($status !== 'cancelled') {
-            if ($counts['completed'] === (int)$job['total']) { $status = 'completed'; }
-            elseif ($queued > 0) { $status = $counts['prepared'] > 0 ? 'preparing' : 'queued'; }
-            elseif ($counts['failed'] > 0) { $status = 'failed'; }
-            elseif ($counts['partial'] > 0) { $status = 'partial'; }
-            else { $status = 'awaiting_converter'; }
-        }
+        $status = $this->jobStatus($job,$counts,$queued);
         $error = null;
         foreach ($rows as $row) { if ($row['status'] === 'failed' && $row['error']) { $error = $row['error']; break; } }
         if ($status !== $job['status'] || $error !== $job['error']) {
@@ -201,6 +194,33 @@ final class App {
         $rows = $this->rows('SELECT * FROM jobs WHERE id=?',[$id]);
         if (!$rows) { throw new AppException('找不到任務',404); }
         return $rows[0];
+    }
+
+    private function jobStatus(array $job, array $counts, int $queued): string {
+        if ($job['status']==='cancelled') { return 'cancelled'; }
+        if ($counts['completed']===(int)$job['total']) { return 'completed'; }
+        if ($queued>0) { return $counts['prepared']>0 ? 'preparing' : 'queued'; }
+        if ($counts['failed']>0) { return 'failed'; }
+        if ($counts['partial']>0) { return 'partial'; }
+        return 'awaiting_converter';
+    }
+
+    private function refreshJobStatus(string $id): void {
+        $job=$this->jobRow($id);
+        $counts=$this->rows("SELECT
+            COUNT(CASE WHEN prepared_at IS NOT NULL OR status IN ('completed','partial') THEN 1 END) AS prepared,
+            COUNT(CASE WHEN status='completed' THEN 1 END) AS completed,
+            COUNT(CASE WHEN status='failed' THEN 1 END) AS failed,
+            COUNT(CASE WHEN status='partial' THEN 1 END) AS partial,
+            COUNT(CASE WHEN status='queued' THEN 1 END) AS queued
+            FROM job_items WHERE job_id=?",[$id])[0];
+        $status=$this->jobStatus($job,$counts,(int)$counts['queued']);
+        $errors=$this->rows("SELECT error FROM job_items WHERE job_id=? AND status='failed' AND error IS NOT NULL AND error<>'' ORDER BY rowid LIMIT 1",[$id]);
+        $error=$errors[0]['error'] ?? null;
+        if ($status!==$job['status'] || $error!==$job['error']) {
+            // Compare the old status so a concurrent cancellation always wins.
+            $this->statement('UPDATE jobs SET status=?,error=?,updated_at=? WHERE id=? AND status=?',[$status,$error,$this->now(),$id,$job['status']]);
+        }
     }
 
     public function cancelJob(string $id): array {
@@ -229,20 +249,26 @@ final class App {
         if (!$lock) { throw new RuntimeException('無法開啟 worker lock'); }
         $stats = ['locked'=>false,'processed'=>0,'prepared'=>0,'failed'=>0,'completed'=>0,'converter_ready'=>false];
         if (!flock($lock,LOCK_EX|LOCK_NB)) { fclose($lock); $stats['locked']=true; return $stats; }
+        $runner=null;
         try {
+            $started=microtime(true);
             // 先撤回遺失成果的完成狀態，再取有限批次；來源清單已在建立任務時凍結。
             $this->jobs();
             $rows = $this->rows("SELECT i.* FROM job_items i JOIN jobs j ON j.id=i.job_id WHERE i.status='queued' AND j.status IN ('queued','preparing')".($jobId!==null ? ' AND j.id=?' : '')." ORDER BY j.created_at,j.rowid,i.rowid LIMIT ?",$jobId!==null ? [$jobId,$batch] : [$batch]);
-            $started=microtime(true);
             foreach ($rows as $row) {
                 if ($timeBudget>0 && microtime(true)-$started>=$timeBudget) { break; }
-                if (!in_array($this->jobRow($row['job_id'])['status'],['queued','preparing'],true)) { continue; }
+                // Earlier results can satisfy another selected row in an overlapping job.
+                if (!$this->rows("SELECT 1 FROM job_items i JOIN jobs j ON j.id=i.job_id WHERE i.job_id=? AND i.source_key=? AND i.build_id=? AND i.status='queued' AND j.status IN ('queued','preparing')",[$row['job_id'],$row['source_key'],$row['build_id']])) { continue; }
                 try {
-                    $inputPath=$this->prepareInput($row);
                     if (Recipes::procedural($row['recipe_key'])) {
-                        $this->generateProcedural($row,$inputPath);
-                    }
-                    $changed = $this->statement("UPDATE job_items SET status=CASE WHEN status='queued' THEN 'prepared' ELSE status END,prepared_at=?,error=NULL WHERE job_id=? AND source_key=? AND build_id=? AND status IN ('queued','completed') AND EXISTS(SELECT 1 FROM jobs j WHERE j.id=job_id AND j.status<>'cancelled')",[$this->now(),$row['job_id'],$row['source_key'],$row['build_id']])->rowCount();
+                        if (!$runner) {
+                            $venv=dirname(__DIR__).'/.venv-procedural/bin/python';
+                            $python=$this->config['procedural_python'] ?? (getenv('GEOTEXTURE_PYTHON') ?: (is_executable($venv) ? $venv : 'python3'));
+                            $runner=new ProceduralRunner($python);
+                        }
+                        $this->generateProcedural($row,$runner);
+                    } else { $this->prepareInput($row); }
+                    $changed = $this->statement("UPDATE job_items SET status=CASE WHEN status='queued' THEN CASE WHEN asset_id IS NULL THEN 'prepared' ELSE 'partial' END ELSE status END,prepared_at=?,error=NULL WHERE job_id=? AND source_key=? AND build_id=? AND status IN ('queued','completed') AND EXISTS(SELECT 1 FROM jobs j WHERE j.id=job_id AND j.status<>'cancelled')",[$this->now(),$row['job_id'],$row['source_key'],$row['build_id']])->rowCount();
                     $stats['prepared'] += $changed;
                     if (Recipes::procedural($row['recipe_key'])) { $stats['completed']+=$changed; }
                 } catch (Throwable $e) {
@@ -252,10 +278,10 @@ final class App {
                 }
                 $stats['processed'] += $changed;
                 $this->statement('UPDATE jobs SET updated_at=? WHERE id=?',[$this->now(),$row['job_id']]);
-                $this->job($row['job_id'],false);
+                $this->refreshJobStatus($row['job_id']);
             }
             return $stats;
-        } finally { flock($lock,LOCK_UN); fclose($lock); }
+        } finally { $runner?->close(); flock($lock,LOCK_UN); fclose($lock); }
     }
 
     private function prepareInput(array $row): string {
@@ -263,23 +289,24 @@ final class App {
         $this->directory($dir);
         $key = hash('sha256',$this->json([$row['source_key'],$row['build_id'],$row['source_hash'],$row['recipe_key']]));
         $target = $dir . '/' . $key . '.json';
-        $input = ['source_key'=>$row['source_key'],'build_id'=>$row['build_id'],'source_hash'=>$row['source_hash'],'recipe_key'=>$row['recipe_key'],'feature'=>json_decode($row['feature_json'],true,512,JSON_THROW_ON_ERROR)];
         $temp = tempnam($dir,'input-');
         if (!$temp) { throw new RuntimeException('無法建立前置資料暫存檔'); }
         try {
-            if (file_put_contents($temp,$this->json($input),LOCK_EX) === false || !rename($temp,$target)) { throw new RuntimeException('無法儲存前置資料'); }
+            if (file_put_contents($temp,$this->json($this->frozenInput($row)),LOCK_EX) === false || !rename($temp,$target)) { throw new RuntimeException('無法儲存前置資料'); }
         } finally { if (is_file($temp)) { unlink($temp); } }
         return $target;
     }
 
-    private function generateProcedural(array $row, string $inputPath): void {
+    private function frozenInput(array $row): array {
+        return ['source_key'=>$row['source_key'],'build_id'=>$row['build_id'],'source_hash'=>$row['source_hash'],'recipe_key'=>$row['recipe_key'],'feature'=>json_decode($row['feature_json'],true,512,JSON_THROW_ON_ERROR)];
+    }
+
+    private function generateProcedural(array $row, ProceduralRunner $runner): void {
         $dir=$this->artifactDir.'/procedural-work'; $this->directory($dir);
         $name=bin2hex(random_bytes(12));
         $path=$dir.'/'.$name.'.glb'; $manifest=$dir.'/'.$name.'.manifest.json';
-        $venv=dirname(__DIR__).'/.venv-procedural/bin/python';
-        $python=$this->config['procedural_python'] ?? (getenv('GEOTEXTURE_PYTHON') ?: (is_executable($venv) ? $venv : 'python3'));
         try {
-            ProceduralRunner::generate($inputPath,$path,$python);
+            $runner->generateRequest($this->frozenInput($row),$path);
             if ($this->jobRow($row['job_id'])['status']==='cancelled') { return; }
             $this->registerResult([
                 'source_key'=>$row['source_key'],'build_id'=>$row['build_id'],
@@ -352,7 +379,8 @@ final class App {
             unlink($target);
             throw $e;
         }
-        $this->jobs();
+        $affected=$this->rows("SELECT DISTINCT i.job_id FROM job_items i JOIN jobs j ON j.id=i.job_id WHERE i.source_key=? AND i.build_id=? AND i.source_hash=? AND i.recipe_key=? AND j.status<>'cancelled'",$versions);
+        foreach ($affected as $item) { $this->refreshJobStatus($item['job_id']); }
         return ['asset_id'=>$id,'source_key'=>$versions[0],'build_id'=>$versions[1],'source_hash'=>$versions[2],'recipe_key'=>$versions[3],'model'=>$this->model($this->assetById($id))];
     }
 

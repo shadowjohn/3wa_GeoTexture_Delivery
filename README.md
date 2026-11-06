@@ -47,7 +47,7 @@ public/                網站根目錄（Apache／IIS 均指向這裡）
 src/                   PHP 幾何、來源、任務與登入
 cli/                   一次性 worker、成果登錄
 db/app.sqlite          自動建立；帳號、任務、逐棟狀態、成果索引
-db/inputs/             排程準備的每棟轉換輸入 JSON
+db/inputs/             實景配方準備的每棟轉換輸入 JSON
 db/artifacts/          已登錄成果；GLB 經授權 API 讀取
 db/.htaccess           Apache 拒絕直接存取 db 全目錄
 db/web.config          IIS 拒絕直接存取 db 全目錄
@@ -89,6 +89,8 @@ php cli/worker.php --batch=100 --time-budget=45
 
 正式站已安裝 john 的每分鐘 cron（2026-11-06），沿用既有 worker 鎖，與網頁手動批次互斥。每批最多 100 棟，45 秒後不再啟動下一棟；單棟仍可完成後再結束。頁面用 AJAX 每 3 秒讀取精簡進度，關閉頁面不影響轉換。
 
+程序化配方每批共用一個 Python 行程，以 stdin/stdout 逐棟傳入資料與回報結果，不再產生輸入 JSON 小檔。每棟完成立即更新受影響任務；錯誤、取消、20 秒逾時及成果完整性檢查仍保留。[完整 worker 實測與限制](docs/2026-11-06-batch-results.md)
+
 ```cron
 * * * * * cd /var/www/html/demo/php/map/map_building_skin && /usr/bin/php cli/worker.php --batch=100 --time-budget=45 >> /home/john/logs/map-building-skin-worker.log 2>&1
 ```
@@ -112,7 +114,7 @@ Linux 將 Python 路徑換為 `.venv-orthofacade/bin/python`。試轉每棟最�
 
 Python CLI 使用自己的路徑參數，不會讀取 PHP 的 GEOTEXTURE_STATE_DIR／GEOTEXTURE_SOURCE_DB；自訂位置請加上 `--app-db`、`--source-db`，必要時另指定 `--token-file`。
 
-`db/inputs/<版本雜湊>.json` 包含 `source_key`、`build_id`、`source_hash`、`recipe_key` 與原始建物 Feature。PHP／Python 轉換器可逐筆消費，再將可攜 GLB 放入 `db/artifacts/incoming/`。
+實景配方的 `db/inputs/<版本雜湊>.json` 包含 `source_key`、`build_id`、`source_hash`、`recipe_key` 與原始建物 Feature。PHP／Python 轉換器可逐筆消費，再將可攜 GLB 放入 `db/artifacts/incoming/`。
 
 以輸入 JSON 的實際識別與 hash 登錄結果：
 

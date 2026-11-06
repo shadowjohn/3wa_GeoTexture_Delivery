@@ -283,6 +283,8 @@ try {
     $pilotOverlap=$pilotApp->createJob('部分成果重疊',$polygon);
     check($pilotOverlap['completed']===0 && $pilotOverlap['skipped']===0 && $pilotOverlap['items'][0]['status']==='queued','新任務不可將partial當完成重用');
     $pilotApp->runBatch(100);
+    $pilotProgress=array_column($pilotApp->progress()['jobs'],null,'id');
+    check($pilotProgress[$pilotOverlap['id']]['status']==='partial' && $pilotProgress[$pilotOverlap['id']]['partial']===1,'worker後輕量進度保留部分成果狀態');
     check($pilotApp->job($pilotOverlap['id'])['completed']===0,'worker不可把部分成果當成完成');
     $pilotApp->cancelJob($pilotJob['id']); $pilotApp->retryJob($pilotJob['id']);
     check(is_file($pilotApp->modelFile($partial['asset_id'])['path']) && $pilotApp->job($pilotJob['id'])['items'][0]['status']==='queued','取消重試保留部分成果並重新準備');
