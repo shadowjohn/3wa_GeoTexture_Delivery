@@ -25,7 +25,7 @@
 - [x] Frontend implementation in `public/assets/map.mjs`: store loaded descriptors/last-use counters; compute visible active candidates; select compatible chunks; retain eligible ready descriptors within the margin/budgets; retire conflicts and only then pump new active requests. Keep white/count updates tied to ready coverage. Use small named methods for version matching and budget estimation where shared by lifecycle paths.
 - [x] Integrate explicit reset behavior in `public/assets/app.mjs` only where needed, preserve AJAX/view guards, and bump app/map cache keys in `public/index.php` and app import. Run `node tests/map-preview.mjs && node tests/frontend.mjs && node tests/model-quality.mjs`.
 - [x] Browser: use isolated authenticated fixture, compare fixed nearby pan/zoom/return route before and after; count actual model additions/removals and loaded resources, inspect duplicates, retention and repeated route plateau. Exercise source/style/2D reset and actual scene metadata from PHP. Record headless limitations and measured results.
-- [ ] Review combined diff for spec then correctness; fix only material findings. Run relevant PHP/Node/HTTP checks, inspect modes and git diff, commit explicit paths. Fast-forward production under existing `db/worker.lock`, verify authenticated boundary protection and public assets; keep cron and source data untouched.
+- [x] Review combined diff for spec then correctness; fix only material findings. Run relevant PHP/Node/HTTP checks, inspect modes and git diff, commit explicit paths. Fast-forward production under existing `db/worker.lock`, verify authenticated boundary protection and public assets; keep cron and source data untouched.
 
 ## Acceptance examples
 

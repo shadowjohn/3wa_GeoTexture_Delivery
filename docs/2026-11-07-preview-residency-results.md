@@ -45,3 +45,5 @@ Node 覆蓋來回移動 instance 重用、保留範圍與數量／估算位元�
 瀏覽器實際操作驗證切換風格、臺中／新北、2D／3D、關閉／開啟合併預覽；2D 後模型、描述資料、GPU geometry／texture／program 均清空，恢復 3D 後覆蓋正常。來源檔案、既有匯出 ID、原 worker 與排程維持相容；新增記憶體估算不參與匯出 fingerprint。
 
 測試原始數據、路線與截圖放在 `/tmp/geotexture-residency-browser/`。
+
+2026-11-07 已在原 worker lock 保護下部署至正式站。正式資料的 8 個既有區塊 ID（199 個成員）直接提供新中繼資料，無須重新轉檔；另抽查 32 個單棟精簡回應。公開 app/map 模組與部署檔逐位元相同，匿名 scene API 為 401，資料、Git、SQLite 直接存取維持 403，PHP 權限為 0755。既有每分鐘 cron 正常執行、無失敗。
