@@ -3,6 +3,7 @@
 /.venv-orthofacade/
 /.venv-calibration/
 /.venv-procedural/
+/.worktrees/
 __pycache__/
 /db/*
 !/db/.htaccess
