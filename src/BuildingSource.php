@@ -16,12 +16,25 @@ final class BuildingSource
     public const MAX_QUERY_LIMIT = 10000;
     public const MAX_BBOX_SPAN = 0.25;
     private SQLite3 $db;
+    private string $table;
+    private array $openings = [];
 
-    public function __construct(string $path)
+    public function __construct(string $path, private string $sourceKey = self::SOURCE_KEY, ?string $openingsPath = null)
     {
+        $this->table = match ($sourceKey) { self::SOURCE_KEY => '8418', 'taichung-8' => '8', default => throw new InvalidArgumentException('未知建物來源') };
+        if ($sourceKey === 'taichung-8' && $openingsPath !== null) {
+            $data = json_decode(file_get_contents($openingsPath),true,512,JSON_THROW_ON_ERROR);
+            foreach ($data['features'] as $feature) {
+                $key=$feature['properties']['build_id'];
+                if (isset($this->openings[$key])) { throw new RuntimeException('車站開口 build_id 重複'); }
+                $this->openings[$key]=['version'=>1,'source_key'=>$sourceKey,'build_id'=>$key,'base_m'=>$feature['properties']['base_m'],
+                    'name'=>$feature['properties']['name'],'estimated'=>true,'width_scale'=>$feature['properties']['width_scale'] ?? 1,
+                    'geometry'=>$feature['geometry'],'attribution'=>$data['source']];
+            }
+        }
         $resolved = realpath($path);
         if ($resolved === false || !is_file($resolved) || !is_readable($resolved)) {
-            throw new InvalidArgumentException('找不到可讀取的新北建物資料庫。');
+            throw new InvalidArgumentException('找不到可讀取的建物資料庫。');
         }
         if (!class_exists(SQLite3::class)) {
             throw new RuntimeException('請啟用 PHP sqlite3 擴充套件。');
@@ -32,12 +45,12 @@ final class BuildingSource
         $this->db->busyTimeout(2000);
         $this->db->exec('PRAGMA query_only=ON');
         try {
-            $result = $this->db->query('SELECT ogc_fid,build_id,buildname,build_h,build_no,GEOMETRY_WKT FROM [8418] LIMIT 0');
+            $result = $this->db->query("SELECT ogc_fid,build_id,buildname,build_h,build_no,GEOMETRY_WKT FROM [{$this->table}] LIMIT 0");
             $result->finalize();
-            $result = $this->db->query('SELECT pkid,xmin,xmax,ymin,ymax FROM idx_8418_GEOMETRY LIMIT 0');
+            $result = $this->db->query("SELECT pkid,xmin,xmax,ymin,ymax FROM idx_{$this->table}_GEOMETRY LIMIT 0");
             $result->finalize();
         } catch (Throwable $error) {
-            throw new RuntimeException('來源資料庫缺少 8418 建物資料或空間索引。', 0, $error);
+            throw new RuntimeException('來源資料庫缺少建物資料或空間索引。', 0, $error);
         }
     }
 
@@ -50,13 +63,13 @@ final class BuildingSource
 
     public function meta(): array
     {
-        $bounds = $this->db->querySingle('SELECT MIN(xmin) AS west,MIN(ymin) AS south,MAX(xmax) AS east,MAX(ymax) AS north FROM idx_8418_GEOMETRY', true);
+        $bounds = $this->db->querySingle("SELECT MIN(xmin) AS west,MIN(ymin) AS south,MAX(xmax) AS east,MAX(ymax) AS north FROM idx_{$this->table}_GEOMETRY", true);
         return [
             'ready' => true,
-            'name' => '新北市建物（8418）',
-            'source_key' => self::SOURCE_KEY,
+            'name' => $this->sourceKey === self::SOURCE_KEY ? '新北市建物（8418）' : '臺中市建物（8）',
+            'source_key' => $this->sourceKey,
             'crs' => 'EPSG:4326',
-            'count' => (int) $this->db->querySingle('SELECT COUNT(*) FROM [8418]'),
+            'count' => (int) $this->db->querySingle("SELECT COUNT(*) FROM [{$this->table}]"),
             'bbox' => $bounds['west'] === null ? null : array_map('floatval', [$bounds['west'], $bounds['south'], $bounds['east'], $bounds['north']]),
         ];
     }
@@ -71,7 +84,7 @@ final class BuildingSource
             $polygon = Geometry::validatePolygon($polygon);
         }
         $sql = 'SELECT b.ogc_fid,b.build_id,b.buildname,b.build_h,b.build_no,b.GEOMETRY_WKT '
-            . 'FROM idx_8418_GEOMETRY AS r JOIN [8418] AS b ON b.ogc_fid=r.pkid '
+            . "FROM idx_{$this->table}_GEOMETRY AS r JOIN [{$this->table}] AS b ON b.ogc_fid=r.pkid "
             . 'WHERE r.xmax>=:west AND r.xmin<=:east AND r.ymax>=:south AND r.ymin<=:north '
             . 'ORDER BY b.ogc_fid';
         // Polygon 篩選必須先完成精確比對，再取 limit+1；不可讓 bbox 假陽性佔用名額。
@@ -102,7 +115,7 @@ final class BuildingSource
                     $truncated = true;
                     break;
                 }
-                $features[] = self::feature($row, $geometry);
+                $features[] = $this->feature($row, $geometry);
             }
         } finally {
             $result->finalize();
@@ -111,11 +124,11 @@ final class BuildingSource
         return [
             'type' => 'FeatureCollection',
             'features' => $features,
-            'meta' => ['returned' => count($features), 'truncated' => $truncated, 'limit' => $limit, 'bbox' => $bbox, 'source_key' => self::SOURCE_KEY],
+            'meta' => ['returned' => count($features), 'truncated' => $truncated, 'limit' => $limit, 'bbox' => $bbox, 'source_key' => $this->sourceKey],
         ];
     }
 
-    private static function feature(array $row, array $geometry): array
+    private function feature(array $row, array $geometry): array
     {
         $height = $row['build_h'] === null ? null : (float) $row['build_h'];
         $missing = $height === null || !is_finite($height) || $height <= 0;
@@ -123,8 +136,10 @@ final class BuildingSource
         if (in_array(strtoupper($name), ['NA', 'N/A', 'NULL'], true)) {
             $name = '';
         }
-        $hashInput = [self::SOURCE_KEY, (string) $row['build_id'], (string) ($row['buildname'] ?? ''),
+        $hashInput = [$this->sourceKey, (string) $row['build_id'], (string) ($row['buildname'] ?? ''),
             $row['build_h'], $row['build_no'], (string) $row['GEOMETRY_WKT']];
+        $correction=$this->openings[(string)$row['build_id']] ?? null;
+        if ($correction !== null) { $hashInput[]=$correction; }
         return [
             'type' => 'Feature',
             'id' => (string) $row['build_id'],
@@ -134,13 +149,14 @@ final class BuildingSource
                 'name' => $name,
                 'height' => $missing ? null : $height,
                 'height_missing' => $missing,
+                'geometry_correction' => $correction,
                 'source_hash' => hash('sha256', json_encode($hashInput, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR)),
-                'source_key' => self::SOURCE_KEY,
+                'source_key' => $this->sourceKey,
             ],
         ];
     }
 
-    private static function validateBbox(array $bbox): array
+    public static function validateBbox(array $bbox): array
     {
         if (!array_is_list($bbox) || count($bbox) !== 4) {
             throw new InvalidArgumentException('bbox 必須是 [west,south,east,north]。');

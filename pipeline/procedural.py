@@ -16,7 +16,9 @@ from pathlib import Path
 
 import numpy as np
 from PIL import Image, ImageDraw
-from shapely.geometry import MultiPolygon, Polygon
+from shapely.geometry import MultiPolygon, Polygon, Point, shape
+from shapely.ops import transform
+from shapely.affinity import scale
 
 from .glb_export import EPS, RADIUS_M, _Glb, _group, _quad, _triangles
 
@@ -105,6 +107,61 @@ def _source(request):
     if not MultiPolygon(shapes).is_valid:
         raise ValueError('source footprint polygons overlap or are invalid')
     return height, lon, lat, projected, shapes
+
+
+def _station_parts(request, height, lon, lat, polygons):
+    correction = request['feature']['properties'].get('geometry_correction')
+    if correction is None:
+        return None
+    if not isinstance(correction, dict) or correction.get('version') != 1 or correction.get('estimated') is not True:
+        raise ValueError('invalid station correction')
+    if any(correction.get(k) != request[k] for k in ('source_key', 'build_id')):
+        raise ValueError('station correction identity mismatch')
+    base = _number(correction.get('base_m'), 'station clearance')
+    width = _number(correction.get('width_scale'), 'station width scale')
+    if not 0 < base < min(height, 15.000001) or not .1 <= width <= 3:
+        raise ValueError('station clearance or width outside supported range')
+    geometry = correction.get('geometry')
+    if not isinstance(geometry, dict) or geometry.get('type') not in ('Polygon', 'MultiPolygon'):
+        raise ValueError('station mask must be polygonal')
+    raw = [geometry['coordinates']] if geometry['type'] == 'Polygon' else geometry['coordinates']
+    points = [p for rings in raw for ring in rings for p in ring]
+    if not points or len(points) > MAX_VERTICES:
+        raise ValueError('station mask exceeds vertex limit')
+    for point in points:
+        if len(point) != 2 or not -180 <= _number(point[0], 'mask longitude') <= 180 or not -90 < _number(point[1], 'mask latitude') < 90:
+            raise ValueError('invalid station mask coordinate')
+    mask = shape(geometry)
+    if mask.is_empty or not mask.is_valid:
+        raise ValueError('invalid station mask geometry')
+    k = math.pi / 180 * RADIUS_M
+    mask = transform(lambda x, y, z=None: ((np.asarray(x)-lon)*k*math.cos(math.radians(lat)), (np.asarray(y)-lat)*k), mask)
+    if width != 1:
+        mask = scale(mask, xfact=width, yfact=width, origin='centroid')
+    parts = []
+    def append(geometry, floor, boundary):
+        if geometry.is_empty:
+            return
+        if geometry.geom_type != 'Polygon':
+            for item in getattr(geometry, 'geoms', []):
+                append(item, floor, boundary)
+            return
+        if geometry.area <= EPS:
+            return
+        rings = [np.array(r.coords) for r in [geometry.exterior, *geometry.interiors]]
+        parts.append((rings, geometry, floor, boundary, base))
+    cut_area = 0
+    # shortcut: masks and 6m clearance are illustrative; replace with surveyed station geometry when available.
+    for polygon in polygons:
+        cut = polygon.intersection(mask)
+        cut_area += cut.area
+        append(polygon.difference(mask), 0, polygon.boundary)
+        append(cut, base, polygon.boundary)
+    if cut_area <= EPS:
+        raise ValueError('station opening does not intersect this building')
+    if sum(len(r) for rings, *_ in parts for r in rings) > MAX_VERTICES:
+        raise ValueError('station cut exceeds vertex limit')
+    return parts
 
 
 def _shade(color, amount):
@@ -216,7 +273,9 @@ def generate_request(request, output_path):
     output_path = Path(output_path).resolve()
     height, lon, lat, rings_by_polygon, polygons = _source(request)
     # Triangulate before creating output, preserving concavities and courtyard holes.
-    triangles_by_polygon = [_triangles(polygon) for polygon in polygons]
+    station_parts = _station_parts(request, height, lon, lat, polygons)
+    parts = station_parts or [(rings, polygon, 0, None, 0) for rings, polygon in zip(rings_by_polygon, polygons)]
+    triangles_by_polygon = [_triangles(part[1]) for part in parts]
     seed = hashlib.sha256(json.dumps([request[k] for k in ('source_key', 'build_id', 'recipe_key')],
                                      ensure_ascii=False, separators=(',', ':')).encode()).digest()
     rng = random.Random(int.from_bytes(seed, 'big'))
@@ -238,27 +297,34 @@ def generate_request(request, output_path):
                                      'required_texture': kind != 'base', 'surface_ranges': []})
               for kind, material in [('wall', wall_material), ('roof', roof_material), ('base', base_material)]}
     surfaces = []
-    for pi, (rings, polygon, triangles) in enumerate(zip(rings_by_polygon, polygons, triangles_by_polygon)):
+    for pi, ((rings, polygon, base, boundary, clearance), triangles) in enumerate(zip(parts, triangles_by_polygon)):
         for ri, ring in enumerate(rings):
             signed_area = sum(float(a[0] * b[1] - b[0] * a[1]) for a, b in zip(ring, ring[1:]))
             sign = 1 if (signed_area > 0) == (ri == 0) else -1
             for ei, (a, b) in enumerate(zip(ring, ring[1:])):
                 edge = b - a
                 length = float(np.linalg.norm(edge))
+                if length <= EPS:
+                    continue
+                top = height
+                if boundary is not None and boundary.distance(Point((a + b) / 2)) > 1e-6:
+                    if base > 0:
+                        continue
+                    top = clearance
                 key = f'source:p{pi}:r{ri}:e{ei}'
                 group = groups['wall']
                 index_offset = len(group['indices'])
                 normal = [sign * edge[1] / length, 0, sign * edge[0] / length]
-                points = [[a[0], 0, -a[1]], [b[0], 0, -b[1]],
-                          [b[0], height, -b[1]], [a[0], height, -a[1]]]
+                points = [[a[0], base, -a[1]], [b[0], base, -b[1]],
+                          [b[0], top, -b[1]], [a[0], top, -a[1]]]
                 # Align floor bands from ground level for every wall, independent of width.
-                u, v = length / repeat[0], height / repeat[1]
-                _quad(group, points, normal, [[0, 0], [u, 0], [u, -v], [0, -v]], sign < 0)
+                u, v = length / repeat[0], top / repeat[1]
+                _quad(group, points, normal, [[0, -base / repeat[1] if base else 0], [u, -base / repeat[1] if base else 0], [u, -v], [0, -v]], sign < 0)
                 group['extras']['surface_ranges'].append({'key': key, 'index_offset': index_offset,
                                                          'index_count': len(group['indices']) - index_offset})
-                surfaces.append({'key': key, 'kind': 'wall', 'textured': True, 'area_m2': length * height,
+                surfaces.append({'key': key, 'kind': 'wall', 'textured': True, 'area_m2': length * (top - base),
                                  'geometric_coverage': 1, 'coverage': 1})
-        for kind, y, direction in [('roof', height, 1), ('base', 0, -1)]:
+        for kind, y, direction in [('roof', height, 1), ('base', base, -1)]:
             key = f'{kind}:p{pi}'
             group = groups[kind]
             index_offset = len(group['indices'])
@@ -291,6 +357,8 @@ def generate_request(request, output_path):
                      'surfaces': surfaces, 'textures': [{'embedded_sha256': hashlib.sha256(raw).hexdigest(),
                                                        'width': TEXTURE_SIZE, 'height': TEXTURE_SIZE}
                                                       for raw in (wall_image, roof_image)]})
+    if station_parts is not None:
+        metadata['geometry_correction'] = request['feature']['properties']['geometry_correction']
     glb.doc['asset']['extras'] = {'geotexture': metadata}
     encoded = glb.bytes()
     manifest = {**metadata, 'model_sha256': hashlib.sha256(encoded).hexdigest()}

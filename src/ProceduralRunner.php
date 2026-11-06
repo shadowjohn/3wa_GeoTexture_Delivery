@@ -11,34 +11,42 @@ final class ProceduralRunner {
 
     public function __construct(private string $python) {}
 
-    // Trusted executable and fixed module; user data is read from a private JSON file.
     public static function generate(string $input, string $output, string $python): void {
-        $pipes=[];
-        $process=proc_open([$python,'-m','pipeline.procedural',$input,$output],
+        self::run($input,$output,$python,'pipeline.procedural',20,null);
+    }
+
+    public static function scene(string $input,string $output,string $python,callable $progress): void {
+        self::run($input,$output,$python,'pipeline.scene',90,$progress);
+    }
+
+    // Fixed modules and a trusted executable; paths never come from HTTP input.
+    private static function run(string $input,string $output,string $python,string $module,int $timeout,?callable $progress): void {
+        $pipes=[];$process=proc_open([$python,'-u','-m',$module,$input,$output],
             [0=>['pipe','r'],1=>['pipe','w'],2=>['pipe','w']],$pipes,dirname(__DIR__));
-        if (!is_resource($process)) { throw new RuntimeException('無法啟動立面產生器'); }
-        fclose($pipes[0]);
-        stream_set_blocking($pipes[1],false); stream_set_blocking($pipes[2],false);
-        $start=microtime(true); $error=''; $exit=-1;
+        if(!is_resource($process)){throw new RuntimeException('無法啟動模型產生器');}
+        fclose($pipes[0]);stream_set_blocking($pipes[1],false);stream_set_blocking($pipes[2],false);
+        $start=microtime(true);$error='';$buffer='';$exit=-1;
         try {
             do {
-                stream_get_contents($pipes[1]);
-                $error=substr($error.stream_get_contents($pipes[2]),-8192);
-                $status=proc_get_status($process);
-                if (!$status['running']) { $exit=$status['exitcode']; break; }
-                if (microtime(true)-$start>20) {
-                    proc_terminate($process,9);
-                    throw new RuntimeException('單棟立面產生超過 20 秒，請縮小範圍後重試');
+                $buffer.=stream_get_contents($pipes[1]);$error=substr($error.stream_get_contents($pipes[2]),-8192);
+                while(($pos=strpos($buffer,"\n"))!==false){
+                    $line=substr($buffer,0,$pos);$buffer=substr($buffer,$pos+1);
+                    if($progress && trim($line)!==''){$event=json_decode($line,true,32,JSON_THROW_ON_ERROR);if(!is_array($event)){throw new RuntimeException('模型進度格式錯誤');}$progress($event);}
                 }
-                usleep(20000);
-            } while (true);
+                if(strlen($buffer)>65536){throw new RuntimeException('模型產生器回應過大');}
+                if($progress){$progress(null);}
+                $status=proc_get_status($process);if(!$status['running']){$exit=$status['exitcode'];break;}
+                if(microtime(true)-$start>$timeout){throw new RuntimeException('模型產生超過 '.$timeout.' 秒，請縮小範圍後重試');}
+                usleep(100000);
+            }while(true);
             $error=substr($error.stream_get_contents($pipes[2]),-8192);
-        } finally {
-            fclose($pipes[1]); fclose($pipes[2]); proc_close($process);
+        }finally{
+            if(proc_get_status($process)['running']){proc_terminate($process,9);}
+            fclose($pipes[1]);fclose($pipes[2]);proc_close($process);
         }
-        if ($exit!==0 || !is_file($output)) {
-            error_log('[GeoTexture procedural] '.$error);
-            throw new RuntimeException('立面產生失敗，請確認建物高度、輪廓及 Python 相依套件');
+        if($exit!==0 || !is_file($output)){
+            error_log('[GeoTexture generator] '.$error);
+            throw new RuntimeException('模型產生失敗，請確認輪廓、高度與範圍限制');
         }
     }
 

@@ -32,7 +32,12 @@ final class App {
         $this->db->exec('PRAGMA foreign_keys=ON');
         $this->db->exec('PRAGMA journal_mode=WAL');
         $this->schema();
-        try { $this->source = new BuildingSource($config['source_db']); }
+        $sourceKey=$config['source_key'] ?? BuildingSource::SOURCE_KEY;
+        if(isset($config['sources'])) {
+            if(!isset($config['sources'][$sourceKey])) { throw new InvalidArgumentException('未知建物來源'); }
+            $source=$config['sources'][$sourceKey];$config['source_db']=$source['path'];$this->config['center']=$source['center'];
+        }
+        try { $this->source = new BuildingSource($config['source_db'],$sourceKey,$config['station_openings'] ?? null); }
         catch (Throwable $e) { $this->sourceError = '建物來源無法開啟：' . $e->getMessage(); }
     }
 
@@ -65,6 +70,8 @@ final class App {
             'center' => $this->config['center'] ?? ['longitude' => 121.41798, 'latitude' => 25.175544],
             'zoom' => $this->config['zoom'] ?? 15, 'converter_ready' => false, 'csrf_token' => null,
             'recipes' => Recipes::all(), 'recipe_key' => $this->recipeKey,
+            'source_key'=>$this->config['source_key'] ?? BuildingSource::SOURCE_KEY,
+            'sources'=>array_map(static fn($s)=>array_intersect_key($s,array_flip(['name','center'])),$this->config['sources'] ?? []),
         ];
     }
 
@@ -186,6 +193,7 @@ final class App {
         // 取消可能與成果檢查併發，讀取不能覆蓋已提交的取消狀態。
         if ($this->jobRow($id)['status'] === 'cancelled') { $status='cancelled'; }
         $result = ['id'=>$id,'name'=>$job['name'],'polygon'=>json_decode($job['polygon_json'],true,512,JSON_THROW_ON_ERROR),'area_m2'=>(float)$job['area_m2'],'total'=>(int)$job['total']] + $counts + ['status'=>$status,'force'=>(bool)$job['force'],'recipe_key'=>$job['recipe_key'],'created_at'=>$job['created_at'],'updated_at'=>$job['updated_at'],'error'=>$error];
+        $result['source_key']=$rows[0]['source_key'] ?? BuildingSource::SOURCE_KEY;
         if ($withItems) { $result['items'] = $items; }
         return $result;
     }
@@ -252,6 +260,7 @@ final class App {
         $runner=null;
         try {
             $started=microtime(true);
+            if($jobId===null){$stats['scenes_processed']=$this->scenes()->runOne()?1:0;}
             // 先撤回遺失成果的完成狀態，再取有限批次；來源清單已在建立任務時凍結。
             $this->jobs();
             $rows = $this->rows("SELECT i.* FROM job_items i JOIN jobs j ON j.id=i.job_id WHERE i.status='queued' AND j.status IN ('queued','preparing')".($jobId!==null ? ' AND j.id=?' : '')." ORDER BY j.created_at,j.rowid,i.rowid LIMIT ?",$jobId!==null ? [$jobId,$batch] : [$batch]);
@@ -341,6 +350,11 @@ final class App {
             $this->validateGlb($path);
         }
         $feature = json_decode($items[0]['feature_json'],true,512,JSON_THROW_ON_ERROR);
+        if(Recipes::procedural($input['recipe_key'])) {
+            $correction=$feature['properties']['geometry_correction'] ?? null;
+            if(($manifest['geometry_correction'] ?? null)!=$correction){throw new InvalidArgumentException('車站幾何修正版本不符');}
+            if($correction!==null){$quality['geometry_correction']=$correction;}
+        }
         $bbox = Geometry::bbox($feature['geometry']);
         $model = ['longitude'=>($bbox[0]+$bbox[2])/2,'latitude'=>($bbox[1]+$bbox[3])/2,'altitude'=>0.0,'heading'=>0.0,'scale'=>1.0];
         foreach ($model as $field=>$default) {
@@ -945,6 +959,21 @@ final class App {
         unset($feature);
         return $collection;
     }
+
+    private function scenes(): SceneJobs {
+        $venv=dirname(__DIR__).'/.venv-procedural/bin/python';
+        $python=$this->config['procedural_python'] ?? (getenv('GEOTEXTURE_PYTHON') ?: (is_executable($venv)?$venv:'python3'));
+        return new SceneJobs($this->db,$this,$this->artifactDir.'/scenes',$python);
+    }
+    public function previewScenes(array $bbox): array { return $this->scenes()->preview($bbox,$this->recipeKey); }
+    public function createSceneExport(array $polygon): array {
+        $polygon=Geometry::validatePolygon($polygon);
+        return $this->scenes()->export($polygon,$this->decorate($this->completeSelection($polygon)),$this->recipeKey);
+    }
+    public function sceneStatus(string $id): array { return $this->scenes()->status($id); }
+    public function cancelSceneExport(string $id): array { return $this->scenes()->cancel($id); }
+    public function sceneFile(string $id,string $format): array { return $this->scenes()->file($id,$format); }
+    public function validateScene(string $path): void { $this->validateGlb($path); }
 
     public function export(array $polygon): string {
         $polygon = Geometry::validatePolygon($polygon);
