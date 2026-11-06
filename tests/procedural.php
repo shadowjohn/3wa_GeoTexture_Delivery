@@ -5,6 +5,11 @@ use GeoTexture\App;
 use GeoTexture\Recipes;
 function ensure(bool $ok,string $why): void { if (!$ok) { throw new RuntimeException($why); } }
 function rejected(callable $fn): void { try { $fn(); } catch (InvalidArgumentException|RuntimeException $e) { return; } throw new RuntimeException('Expected rejection'); }
+function encodedModel(array $document,string $binary): string {
+    $json=json_encode($document,JSON_UNESCAPED_SLASHES|JSON_PRESERVE_ZERO_FRACTION|JSON_THROW_ON_ERROR);
+    $json.=str_repeat(' ',(4-strlen($json)%4)%4);
+    return 'glTF'.pack('VV',2,28+strlen($json)+strlen($binary)).pack('V',strlen($json)).'JSON'.$json.pack('V',strlen($binary))."BIN\0".$binary;
+}
 $tmp=sys_get_temp_dir().'/geotexture-procedural-'.bin2hex(random_bytes(6));
 mkdir($tmp,0755);
 try {
@@ -64,6 +69,42 @@ try {
     $manifestPath=$tmp.'/state/artifacts/validation.manifest.json';
     $valid=json_decode(file_get_contents($manifestPath),true);
     $input['path']='validation.glb'; $input['manifest_path']='validation.manifest.json';
+    $bytes=file_get_contents($output); $jsonLength=unpack('V',substr($bytes,12,4))[1];
+    $document=json_decode(substr($bytes,20,$jsonLength),true); $binary=substr($bytes,28+$jsonLength);
+    ensure(count($document['meshes'][0]['primitives'])===3,'Batch same-material surfaces into three primitives');
+    $ranges=$document['meshes'][0]['primitives'][0]['extras']['surface_ranges'];
+    $badRanges=[[], ['bad'=>$ranges[0]]];
+    foreach (['key'=>['',12,str_repeat('x',513)],'index_offset'=>[0.0,-3,3],'index_count'=>[0,1,999999999]] as $field=>$values) {
+        foreach ($values as $value) { $bad=$ranges; $bad[0][$field]=$value; $badRanges[]=$bad; }
+    }
+    $bad=$ranges; $bad[1]['index_offset']-=3; $badRanges[]=$bad;
+    $bad=$ranges; array_pop($bad); $badRanges[]=$bad;
+    $bad=$ranges; $bad[0]['index_count']=3; $bad[1]['index_offset']=3; $bad[1]['index_count']=9; $badRanges[]=$bad;
+    foreach ($badRanges as $bad) {
+        $changed=$document; $changed['meshes'][0]['primitives'][0]['extras']['surface_ranges']=$bad;
+        $changedBytes=encodedModel($changed,$binary); $changedManifest=$valid;
+        $changedManifest['model_sha256']=hash('sha256',$changedBytes);
+        file_put_contents($output,$changedBytes); file_put_contents($manifestPath,json_encode($changedManifest));
+        rejected(fn()=>$tw->registerResult($input));
+    }
+    // Split shared accessors into legacy per-surface primitives without changing triangles.
+    $legacyDocument=$document; $legacyDocument['meshes'][0]['primitives']=[];
+    foreach ($document['meshes'][0]['primitives'] as $primitive) {
+        foreach ($primitive['extras']['surface_ranges'] as $range) {
+            $part=$primitive; unset($part['extras']['surface_ranges']);
+            $part['extras'][$part['extras']['kind']==='wall' ? 'wall_key' : 'surface_key']=$range['key'];
+            $indices=$document['accessors'][$part['indices']];
+            $indices['byteOffset']=($indices['byteOffset'] ?? 0)+$range['index_offset']*4;
+            $indices['count']=$range['index_count'];
+            $part['indices']=count($legacyDocument['accessors']); $legacyDocument['accessors'][]=$indices;
+            $legacyDocument['meshes'][0]['primitives'][]=$part;
+        }
+    }
+    $legacyBytes=encodedModel($legacyDocument,$binary); $legacyManifest=$valid;
+    $legacyManifest['model_sha256']=hash('sha256',$legacyBytes);
+    file_put_contents($output,$legacyBytes); file_put_contents($manifestPath,json_encode($legacyManifest));
+    ensure($tw->registerResult($input)['model']['surfaces_total']===$valid['surfaces_total'],'Legacy wall-key format remains accepted');
+    file_put_contents($output,$bytes); file_put_contents($manifestPath,json_encode($valid));
     foreach (['style_key'=>'texture-v1','verification_status'=>'verified','longitude'=>0,'surfaces_total'=>0,'model_sha256'=>str_repeat('0',64)] as $key=>$value) {
         $invalid=$valid; $invalid[$key]=$value;
         file_put_contents($manifestPath,json_encode($invalid));

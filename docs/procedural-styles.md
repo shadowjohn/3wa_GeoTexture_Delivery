@@ -23,6 +23,8 @@ PHP 需允許 `proc_open`。worker 優先用 `GEOTEXTURE_PYTHON`，未指定時�
 
 worker 每批以 `python -u -m pipeline.procedural --batch` 共用一個行程，一次只送一棟 NDJSON（含 `request` 與絕對路徑 `output_path`，上限 8 MiB），產生模型和 manifest 後立即收到 `{"ok":true}`。有效的單棟失敗回應不會中斷其餘建物；通訊錯誤或 20 秒逾時會回收子程序，下一棟重新啟動。舊單檔 CLI 保留。PHP 負責任務、取消及成果驗證；Python 不直接更新 SQLite。
 
+新產出的程序化 GLB 將外牆、屋頂、底面各合併成一個 primitive，以 `extras.surface_ranges` 的 `key`、`index_offset`、`index_count` 保存逐面三角形對照；range 以索引元素計數，必須連續且完整涵蓋。既有單面 primitive 仍可登錄。幾何、UV 與貼圖未改變，[實測結果](2026-11-06-material-results.md) 記錄繪製次數及限制。
+
 進度 API `GET api.php?action=progress` 需登入，只回傳各任務的資料庫計數、狀態及 worker 鎖狀態，不掃描模型檔或傳回完整幾何。頁面隱藏時暫停輪詢，避免重疊請求；網路錯誤保留上次進度並自動重試。地圖成果更新最多每 15 秒一次，建物明細按「更新建物清單」取得。
 
 ## 新增風格
@@ -47,7 +49,7 @@ worker 每批以 `python -u -m pipeline.procedural --batch` 共用一個行程�
 ```sh
 php tests/procedural.php
 php tests/batch-worker.php
-.venv-procedural/bin/python -m pytest tests/test_procedural.py tests/test_procedural_batch.py tests/test_http_procedural.py tests/test_glb_export.py -q
+.venv-procedural/bin/python -m pytest tests/test_procedural.py tests/test_procedural_groups.py tests/test_procedural_batch.py tests/test_http_procedural.py tests/test_glb_export.py -q
 node tests/frontend.mjs
 node tests/map-preview.mjs
 ```

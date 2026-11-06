@@ -784,7 +784,20 @@ final class App {
                 $kind=$extras['kind'] ?? 'wall'; $required=$extras['required_texture'] ?? true;
                 if (!is_bool($required) || (!$required && $kind!=='base')) { throw new InvalidArgumentException('只有封閉底面可排除於貼皮面數'); }
                 $wall=!in_array($kind,['roof','base'],true);
-                if ($wall) {
+                $ranges=$extras['surface_ranges'] ?? null;
+                if (array_key_exists('surface_ranges',$extras)) {
+                    if (!is_array($ranges) || !array_is_list($ranges) || !$ranges || !array_key_exists('indices',$primitive) || ($primitive['mode'] ?? 4)!==4) { throw new InvalidArgumentException('GLB surface ranges 必須是非空 TRIANGLES 索引範圍'); }
+                    $indices=$this->glbAccessor($primitive['indices'],$json,$buffers,false);
+                    $end=0;
+                    foreach ($ranges as $range) {
+                        if (!is_array($range) || !is_string($range['key'] ?? null) || $range['key']==='' || strlen($range['key'])>512
+                            || !is_int($range['index_offset'] ?? null) || $range['index_offset']!==$end
+                            || !is_int($range['index_count'] ?? null) || $range['index_count']<=0 || $range['index_count']%3!==0
+                            || $range['index_count']>$indices['count']-$end) { throw new InvalidArgumentException('GLB surface ranges 必須連續、無重疊且符合三角形邊界'); }
+                        $end+=$range['index_count'];
+                    }
+                    if ($end!==$indices['count']) { throw new InvalidArgumentException('GLB surface ranges 未涵蓋全部三角形'); }
+                } elseif ($wall) {
                     $key=$extras['wall_key'] ?? null;
                     if (!is_string($key) || $key==='' || strlen($key)>512) { throw new InvalidArgumentException('貼皮 GLB 牆面 key 缺失'); }
                 }
@@ -814,15 +827,17 @@ final class App {
                 }
                 if ($extras['textured']!==$textured) { throw new InvalidArgumentException('GLB textured 標記與真實材質不符'); }
                 if ($required) {
-                    $key=$wall ? $extras['wall_key'] : ($extras['surface_key'] ?? null);
-                    if (!is_string($key) || $key==='' || strlen($key)>512) { throw new InvalidArgumentException('GLB 必要面缺少 surface key'); }
-                    $surfaceKind=$wall ? 'wall' : $kind;
-                    if (isset($surfaces[$key]) && $surfaces[$key]['kind']!==$surfaceKind) { throw new InvalidArgumentException('GLB surface key 對應多種面類型'); }
-                    $surfaces[$key]??=['kind'=>$surfaceKind,'textured'=>false,'area_m2'=>0.0,'textured_area'=>0.0];
-                    $area=$this->glbPrimitiveArea($primitive,$json,$buffers,$file);
-                    if ($textured && $area<=0) { throw new InvalidArgumentException('貼圖 primitive 沒有可繪製面積'); }
-                    $surfaces[$key]['area_m2']+=$area;
-                    if ($textured) { $surfaces[$key]['textured']=true; $surfaces[$key]['textured_area']+=$area; }
+                    foreach ($ranges ?? [['key'=>$wall ? $extras['wall_key'] : ($extras['surface_key'] ?? null)]] as $range) {
+                        $key=$range['key'];
+                        if (!is_string($key) || $key==='' || strlen($key)>512) { throw new InvalidArgumentException('GLB 必要面缺少 surface key'); }
+                        $surfaceKind=$wall ? 'wall' : $kind;
+                        if (isset($surfaces[$key]) && $surfaces[$key]['kind']!==$surfaceKind) { throw new InvalidArgumentException('GLB surface key 對應多種面類型'); }
+                        $surfaces[$key]??=['kind'=>$surfaceKind,'textured'=>false,'area_m2'=>0.0,'textured_area'=>0.0];
+                        $area=$this->glbPrimitiveArea($primitive,$json,$buffers,$file,$ranges===null ? null : $range);
+                        if ($textured && $area<=0) { throw new InvalidArgumentException('貼圖 primitive 沒有可繪製面積'); }
+                        $surfaces[$key]['area_m2']+=$area;
+                        if ($textured) { $surfaces[$key]['textured']=true; $surfaces[$key]['textured_area']+=$area; }
+                    }
                 }
             }
         }
@@ -838,7 +853,7 @@ final class App {
         return $quality;
     }
 
-    private function glbPrimitiveArea(array $primitive, array $json, array $buffers, $file): float {
+    private function glbPrimitiveArea(array $primitive, array $json, array $buffers, $file, ?array $range=null): float {
         if (($primitive['mode'] ?? 4)!==4) { throw new InvalidArgumentException('貼皮成果目前僅支援 TRIANGLES'); }
         $position=$this->glbAccessor($primitive['attributes']['POSITION'],$json,$buffers,true);
         $triangle=[]; $area=0.0;
@@ -853,6 +868,7 @@ final class App {
         if (!array_key_exists('indices',$primitive)) { $this->scanGlbAccessor($position,$buffers,$file,static function(string $bytes) use ($point): void { $point(array_values(unpack('g3',$bytes))); }); }
         else {
             $indices=$this->glbAccessor($primitive['indices'],$json,$buffers,false); $format=[5121=>'C',5123=>'v',5125=>'V'][$indices['componentType']]; $buffer=$buffers[$position['buffer']];
+            if ($range!==null) { $indices['offset']+=$range['index_offset']*$indices['stride']; $indices['count']=$range['index_count']; }
             $this->scanGlbAccessor($indices,$buffers,$file,static function(string $bytes) use ($format,$position,$buffer,$file,$point): void {
                 $offset=$position['offset']+unpack($format,$bytes)[1]*$position['stride'];
                 if ($buffer['data']!==null) { $value=substr($buffer['data'],$offset,12); }
