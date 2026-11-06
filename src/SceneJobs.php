@@ -22,13 +22,16 @@ final class SceneJobs {
     public function status(string $id): array {
         $r=$this->row($id);$request=json_decode($r['request_json'],true,512,JSON_THROW_ON_ERROR);
         $result=['id'=>$id,'kind'=>$r['kind'],'status'=>$r['status'],'progress'=>(int)$r['progress'],'phase'=>$r['phase'],
-            'total'=>count($request['entries']),'error'=>$r['error'],'members'=>array_column($request['entries'],'asset_id')];
+            'total'=>count($request['entries']),'error'=>$r['error'],'members'=>array_column($request['entries'],'asset_id'),
+            'recipe_key'=>$request['recipe_key'],'member_versions'=>array_map(static fn($entry)=>array_intersect_key($entry,
+                array_flip(['source_key','build_id','source_hash','recipe_key','asset_id','longitude','latitude'])),$request['entries'])];
         if ($r['status']==='completed') {
             $output=json_decode($r['output_json'],true,512,JSON_THROW_ON_ERROR);
             $url='api.php?action=scene_file&id='.$id;
             $result['model']=['asset_id'=>'scene-'.$id,'url'=>$url.'&format=glb','longitude'=>$request['origin']['longitude'],
                 'latitude'=>$request['origin']['latitude'],'altitude'=>0,'heading'=>0,'scale'=>1,'up_axis'=>'Y','forward_axis'=>'-Z',
-                'appearance_kind'=>'procedural','verification_status'=>'synthetic','texture_status'=>'complete'];
+                'appearance_kind'=>'procedural','verification_status'=>'synthetic','texture_status'=>'complete',
+                'resident_bytes'=>(int)$output['stats']['triangles']*96+(int)$output['stats']['texture_pixels']*4+65536];
             $result['stats']=$output['stats'];
             if ($r['kind']==='export') { $result['download_url']=$url.'&format=zip';$result['glb_url']=$url.'&format=glb'; }
         }return $result;
@@ -67,6 +70,8 @@ final class SceneJobs {
     public function export(array $polygon,array $collection,string $recipe): array {
         if (!Recipes::procedural($recipe)) { throw new InvalidArgumentException('整區 GLB 目前支援三種示意立面風格'); }
         if (count($collection['features'])>2000) { throw new InvalidArgumentException('整區 GLB 最多 2000 棟，請縮小範圍'); }
+        // Runtime cache estimates must not change existing immutable export identities.
+        foreach($collection['features'] as &$feature){unset($feature['properties']['model']['resident_bytes']);}unset($feature);
         $entries=$this->entries($collection['features'],$recipe);
         if (!$entries) { throw new InvalidArgumentException('範圍內尚無此風格的完成模型，請先建立轉換任務'); }
         $bbox=Geometry::bbox($polygon);

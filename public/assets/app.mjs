@@ -1,4 +1,4 @@
-import {MapWorkspace} from './map.mjs?v=atlas-scene-1';
+import {MapWorkspace} from './map.mjs?v=viewport-residency-1';
 import {qualityNotices} from './model-quality.mjs';
 
 const $ = id => document.getElementById(id);
@@ -185,9 +185,9 @@ function previewEnabled() {
   return mapReady && map.threeD && recipeKey !== 'texture-v1' && $('preview-chunks').checked;
 }
 
-function applyPreview(scenes) {
+function applyPreview(scenes, fresh = false) {
   previewScenes = scenes;
-  map.setScenes(scenes);
+  map.setScenes(scenes, fresh);
   const pending = scenes.filter(scenePending).length;
   const failed = scenes.filter(scene => ['failed', 'cancelled'].includes(scene.status)).length;
   message(pending ? `${pending} 個街廓背景準備中，可能等候約一分鐘；目前保留個別建物。`
@@ -203,7 +203,7 @@ async function requestPreview(bbox, version) {
     const center=map.native.getCenter();
     const result = await api('preview_scenes', {body: {bbox, center:[center.lng,center.lat]}, signal: request.signal});
     if (request.signal.aborted || generation !== previewVersion || version !== viewVersion || !previewEnabled()) return;
-    applyPreview(result.scenes);
+    applyPreview(result.scenes, true);
   } catch (error) {
     if (!request.signal.aborted && generation === previewVersion) message(`街廓預覽暫不可用，保留個別建物：${error.message}`, true, 'preview-status');
   } finally {

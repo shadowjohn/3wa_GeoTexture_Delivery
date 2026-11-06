@@ -926,6 +926,21 @@ final class App {
 
     private function model(array $asset, bool $preview = false): array {
         $model=['url'=>'api.php?action=model&asset_id='.rawurlencode($asset['asset_id'])] + json_decode($asset['model_json'],true,512,JSON_THROW_ON_ERROR) + ['asset_id'=>$asset['asset_id']];
+        $textureBytes=0;$images=[];
+        foreach ($model['textures'] ?? [] as $index=>$texture) {
+            $width=$texture['width'] ?? null;$height=$texture['height'] ?? null;
+            if (!is_int($width) || !is_int($height) || $width<1 || $height<1 || $width>32768 || $height>32768 || $width*$height>33554432) { $images=[];break; }
+            $key=$texture['embedded_sha256'] ?? $index;
+            if (isset($images[$key])) { continue; }$images[$key]=true;
+            $pixels=$width*$height;$mipPixels=0;
+            // Long, thin images need more mip storage than the square-image 4/3 estimate.
+            while ($width>1 || $height>1) {
+                $mipPixels+=$width*$height;$width=max(1,intdiv($width,2));$height=max(1,intdiv($height,2));
+            }
+            $textureBytes+=max(intdiv($pixels*16+2,3),($mipPixels+1)*4);
+        }
+        // GLB size bounds geometry storage; this is a budget estimate, not measured GPU usage.
+        $model['resident_bytes']=$images ? max(0,(int)$asset['size'])+$textureBytes+65536 : null;
         if ($preview) {
             // 地圖只需定位與品質摘要；逐面紀錄仍保留於詳情、獨立預覽及匯出。
             $warnings=$model['engine_quality']['warnings'] ?? [];

@@ -129,6 +129,6 @@ header('X-Content-Type-Options: nosniff');
     </section>
   </main>
   <script src="https://3wa.tw/inc/javascript/easymap8/easymap.js"></script>
-  <script type="module" src="assets/app.mjs?v=atlas-scene-1"></script>
+  <script type="module" src="assets/app.mjs?v=viewport-residency-1"></script>
 </body>
 </html>

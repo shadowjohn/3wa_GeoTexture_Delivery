@@ -142,6 +142,7 @@ try {
     }
     check($app->job($id)['completed']===0,'拒絕無效網格不能改變完成數');
     $asset=$app->registerResult($registration);
+    check(array_key_exists('resident_bytes',$asset['model']) && $asset['model']['resident_bytes']===null,'無 manifest 的舊模型以 null 表示貼圖記憶體成本未知');
     check($app->job($id)['completed']===1,'只有已登錄有效GLB可算完成');
     $selected=$app->selection($polygon);
     check($selected['features'][0]['properties']['model']['asset_id']===$asset['asset_id'],'選取結果應提供模型下載資訊');
@@ -268,9 +269,18 @@ try {
     file_put_contents($pilotConfig['artifact_dir'].'/incoming/model.manifest.json',json_encode($zeroQuality,JSON_THROW_ON_ERROR));
     rejects(fn()=>$pilotApp->registerResult($pilotRegistration),'零面積貼圖三角形不能冒充已有真實貼面');
     file_put_contents($pilotConfig['artifact_dir'].'/incoming/model.glb',$texturedBytes);
+    $quality['textures'][]=$quality['textures'][0];
     file_put_contents($pilotConfig['artifact_dir'].'/incoming/model.manifest.json',json_encode($quality,JSON_THROW_ON_ERROR));
     rejects(fn()=>$pilotApp->registerResult(array_replace($pilotRegistration,['manifest_path'=>'../pilot-state/app.sqlite'])),'manifest路徑不可跨artifact root');
     $partial=$pilotApp->registerResult($pilotRegistration);
+    $compact=$pilotApp->buildings([121.4,25.17,121.404,25.174],2000,true)['features'][0]['properties']['model'];
+    check(!isset($compact['textures']) && is_int($compact['resident_bytes']) && $compact['resident_bytes']===strlen($texturedBytes)+22+65536,'精簡模型保留正整數記憶體估算，重複貼圖只計一次且包含 mipmaps');
+    check($compact['resident_bytes']===$partial['model']['resident_bytes'],'完整與精簡模型回傳相同記憶體預算');
+    $modelMethod=new ReflectionMethod(App::class,'model');$modelMethod->setAccessible(true);
+    $thin=$modelMethod->invoke($pilotApp,['asset_id'=>str_repeat('f',32),'size'=>100,'model_json'=>json_encode(['textures'=>[['embedded_sha256'=>str_repeat('e',64),'width'=>8,'height'=>1]]])],true);
+    check($thin['resident_bytes']===100+(8+4+2+1)*4+65536,'狹長貼圖的 mipmaps 不可被一般 4/3 估算低估');
+    $unknown=$modelMethod->invoke($pilotApp,['asset_id'=>str_repeat('f',32),'size'=>100,'model_json'=>json_encode(['textures'=>[['width'=>0,'height'=>8]]])],true);
+    check($unknown['resident_bytes']===null,'缺少可用貼圖尺寸時不可回傳過低的記憶體估算');
     $pilotStatus=$pilotApp->job($pilotJob['id']);
     check($pilotStatus['partial']===1 && $pilotStatus['completed']===0 && $pilotStatus['status']==='partial','部分貼皮不能增加完成數');
     check($partial['model']['texture_status']==='partial' && $partial['model']['surfaces_textured']===1 && $partial['model']['forward_axis']==='-Z','model保留品質與定位軸');

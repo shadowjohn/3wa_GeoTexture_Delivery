@@ -1,6 +1,8 @@
 const empty = () => ({type: 'FeatureCollection', features: []});
 const feature = geometry => ({type: 'Feature', properties: {}, geometry});
 const COLORS = {unprocessed: '#9ca9b0', queued: '#e2a62c', failed: '#d8565e', completed: '#087f86'};
+const buildingKey = member => JSON.stringify([member.source_key ?? '', String(member.build_id)]);
+const memberKeys = info => info.member_versions?.map(buildingKey) ?? info.members ?? [info.asset_id];
 
 function roofLineChunks(features) {
   const chunks = [];
@@ -33,6 +35,11 @@ export class MapWorkspace {
     this.pendingModels = new Set();
     this.failedModels = new Set();
     this.wantedModels = new Map();
+    this.modelDescriptors = new Map();
+    this.modelLastUsed = new Map();
+    this.knownVersions = new Map();
+    this.retainedModels = new Set();
+    this.modelUseClock = 0;
     this.assets = new Set();
     this.scenes = [];
     this.chunksEnabled = true;
@@ -147,8 +154,10 @@ export class MapWorkspace {
     this.renderBuildings();
   }
 
-  setScenes(scenes) {
+  setScenes(scenes, fresh = false) {
     this.scenes = scenes;
+    // Only full-cell queries refresh versions; status polling describes an immutable older snapshot.
+    if(fresh) for(const scene of scenes) for(const member of scene.member_versions ?? []) this.knownVersions.set(buildingKey(member),member);
     this.syncModels();
     this.renderBuildings(true);
   }
@@ -209,30 +218,99 @@ export class MapWorkspace {
   syncModels() {
     const small = this.native.getContainer().clientWidth < 600;
     this.modelConcurrency = small ? 2 : 4;
-    let candidates = [], chunks = [];
-    if (this.threeD) {
+    const wanted = new Map(), retained = new Set(), covered = new Set(), claimed = new Set();
+    const clock = ++this.modelUseClock;
+    if (this.threeD && this.collection.features.length) {
       const center = this.native.getCenter(), bounds = this.native.getBounds();
       const longitudeScale = Math.cos(center.lat * Math.PI / 180);
       const available = new Set(this.collection.features.map(f => f.properties.model?.asset_id).filter(Boolean));
-      candidates = this.collection.features.map(f => f.properties.model).filter(info => info
-        && info.longitude >= bounds.getWest() && info.longitude <= bounds.getEast()
-        && info.latitude >= bounds.getSouth() && info.latitude <= bounds.getNorth());
-      const visible = new Set(candidates.map(info => info.asset_id));
       const distance = info => ((info.longitude - center.lng) * longitudeScale) ** 2 + (info.latitude - center.lat) ** 2;
+      const west=bounds.getWest(),east=bounds.getEast(),south=bounds.getSouth(),north=bounds.getNorth();
+      // Retain only a bounded margin, even when a tilted camera sees a distant horizon.
+      const margin = span => Math.max(256,Math.min(1024,span*.25));
+      const dx=margin((east-west)*111319.49)/111319.49;
+      const dy=margin((north-south)*111319.49/longitudeScale)*longitudeScale/111319.49;
+      const inside = (info, pad=false) => (info.member_versions ?? [info]).some(p =>
+        p.longitude >= west-(pad?dx:0) && p.longitude <= east+(pad?dx:0)
+        && p.latitude >= south-(pad?dy:0) && p.latitude <= north+(pad?dy:0));
+      const versions = this.knownVersions;
+      for (const info of [...this.modelDescriptors.values(),...this.scenes]) for (const member of info.member_versions ?? []) {
+        if(!versions.has(buildingKey(member)))versions.set(buildingKey(member),member);
+      }
+      const candidates = [];
+      for (const {properties:p} of this.collection.features) {
+        const model=p.model;
+        const member={source_key:p.source_key,build_id:p.build_id,source_hash:p.source_hash,
+          asset_id:model?.asset_id,recipe_key:model?.style_key,longitude:model?.longitude,latitude:model?.latitude};
+        versions.set(buildingKey(member),member);
+        if(model && inside(model)) candidates.push({...model,member_versions:[member]});
+      }
+      const valid = info => {
+        if (info.members && !info.member_versions?.length) return info.members.every(id=>available.has(id));
+        return info.member_versions?.every(member=>{
+          const current=versions.get(buildingKey(member));
+          return !current || (current.asset_id===member.asset_id
+            && (!current.source_hash || !member.source_hash || current.source_hash===member.source_hash)
+            && (!current.recipe_key || !member.recipe_key || current.recipe_key===member.recipe_key));
+        });
+      };
       candidates.sort((a, b) => distance(a) - distance(b) || a.asset_id.localeCompare(b.asset_id));
-      // shortcut: 邊界街廓成員不全時保留個別模型；需要跨視野載入時再加入完整版本查詢。
-      if (this.chunksEnabled) chunks = this.scenes.filter(scene => scene.status === 'completed' && scene.model
-        && scene.members?.length && scene.members.every(id => available.has(id)) && scene.members.some(id => visible.has(id)))
-        .map(scene => ({...scene.model, members: scene.members}))
-        .sort((a, b) => distance(a) - distance(b)).slice(0, small ? 4 : 8);
-    }
-    this.coveredAssets = new Set(chunks.filter(info => this.readyModels.has(info.asset_id)).flatMap(info => info.members));
-    const singles = candidates.filter(info => !this.coveredAssets.has(info.asset_id)).slice(0, small ? 24 : 64);
-    const wanted = new Map([...chunks, ...singles].map(info => [info.asset_id, info]));
+      const requested = [], requestedKeys=new Set();
+      if(this.chunksEnabled) {
+        const chunks=this.scenes.filter(scene=>scene.status==='completed' && scene.model && scene.members?.length)
+          .map(scene=>({...scene.model,members:scene.members,member_versions:scene.member_versions}))
+          .filter(info=>valid(info) && (info.member_versions?.length ? inside(info) : info.members.some(id=>available.has(id))))
+          .sort((a,b)=>distance(a)-distance(b));
+        for(const info of chunks) {
+          const keys=memberKeys(info);
+          if(keys.some(key=>requestedKeys.has(key)))continue;
+          requested.push(info);keys.forEach(key=>requestedKeys.add(key));
+          if(requested.length===(small?4:8))break;
+        }
+      }
+      const addChunk = info => {
+        wanted.set(info.asset_id,info);
+        memberKeys(info).forEach(key=>claimed.add(key));info.members.forEach(id=>covered.add(id));
+      };
+      for(const info of requested) if(this.readyModels.has(info.asset_id))addChunk(info);
+      let extraBytes=0,extraSingles=0,extraChunks=0;
+      const retain = info => {
+        const bytes=info.resident_bytes;
+        if(!Number.isSafeInteger(bytes) || bytes<=0 || extraBytes+bytes>(small?24:64)*1024*1024)return false;
+        if(info.members ? extraChunks>=(small?2:4) : extraSingles>=(small?12:32))return false;
+        extraBytes+=bytes;if(info.members)extraChunks++;else extraSingles++;
+        retained.add(info.asset_id);return true;
+      };
+      const previous=[...this.modelDescriptors.values()].filter(info=>this.readyModels.has(info.asset_id)
+        && valid(info) && inside(info,true)).sort((a,b)=>(this.modelLastUsed.get(b.asset_id)??0)-(this.modelLastUsed.get(a.asset_id)??0) || distance(a)-distance(b));
+      // Pending replacements keep a valid ready chunk; once ready, overlapping chunks retire together.
+      if(this.chunksEnabled) for(const info of previous) {
+        if(!info.members || wanted.has(info.asset_id) || memberKeys(info).some(key=>claimed.has(key)))continue;
+        if(retain(info))addChunk(info);
+      }
+      for(const info of requested) {
+        wanted.set(info.asset_id,info);
+      }
+      const singles=candidates.filter(info=>!memberKeys(info).some(key=>claimed.has(key))).slice(0,small?24:64);
+      for(const info of singles) wanted.set(info.asset_id,info);
+      for(const info of previous) {
+        if(info.members || wanted.has(info.asset_id) || memberKeys(info).some(key=>claimed.has(key)))continue;
+        if(retain(info))wanted.set(info.asset_id,info);
+      }
+    } else this.knownVersions.clear();
+    this.coveredAssets = covered;
+    this.retainedModels = retained;
     this.wantedModels = wanted;
-    for (const [id, model] of this.models) {
-      if (!wanted.has(id) && !this.pendingModels.has(id)) this.removeModel(id, model);
+    for(const [id,info] of wanted) if(this.modelDescriptors.has(id)) {
+      this.modelDescriptors.set(id,info);
+      if(!retained.has(id))this.modelLastUsed.set(id,clock);
     }
+    for (const [id, model] of this.models) {
+      if (!wanted.has(id) && (this.readyModels.has(id) || !this.pendingModels.has(id))) this.removeModel(id, model);
+    }
+    const referenced = new Set(this.collection.features.map(f=>buildingKey(f.properties)));
+    for(const info of [...this.scenes,...this.modelDescriptors.values()]) for(const member of info.member_versions ?? []) referenced.add(buildingKey(member));
+    for(const key of this.knownVersions.keys()) if(!referenced.has(key))this.knownVersions.delete(key);
     for (const id of this.failedModels) if (!wanted.has(id)) this.failedModels.delete(id);
     this.pumpModels();
   }
@@ -241,6 +319,8 @@ export class MapWorkspace {
     this.e8.removeItem(model);
     this.models.delete(id);
     this.readyModels.delete(id);
+    this.modelDescriptors.delete(id);
+    this.modelLastUsed.delete(id);
   }
 
   pumpModels() {
@@ -264,12 +344,15 @@ export class MapWorkspace {
         });
         this.e8.addItem(model);
         this.models.set(id, model);
+        this.modelDescriptors.set(id,info);
+        this.modelLastUsed.set(id,this.modelUseClock);
         this.pendingModels.add(id);
         model.ready.then(() => {
           if (this.destroyed) return;
           if (this.wantedModels.has(id)) {
             this.readyModels.add(id);
             this.syncModels();
+            if(info.members)this.renderBuildings(true);
           }
           else this.removeModel(id, model);
         }, error => {

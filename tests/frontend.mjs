@@ -140,7 +140,7 @@ const metaData = {source_key: 'taichung-8', source: {ready: true}, csrf_token: '
 const tick = () => new Promise(resolve => setTimeout(resolve, 0));
 const mapStub = `map = {threeD:true,vertices:null,scenes:[],buildings:null,
   native:{getZoom:()=>17,getCenter:()=>({lng:121,lat:25})}, bounds:()=>[120,24,122,26],
-  setScenes(scenes){this.scenes=scenes;}, setBuildings(data){this.buildings=data;},
+  setScenes(scenes,fresh){this.scenes=scenes;this.fresh=fresh;}, setBuildings(data){this.buildings=data;},
   setSelection(p){this.displayed=p;}, home(center){this.center=center;}, locate(){},
   set3D(value){this.threeD=value;}, setChunksEnabled() {}};`;
 let releasePreview;
@@ -152,6 +152,9 @@ const previewFetch = async (url, options) => {
 await new AsyncFunction('assert','document','fetch','location','setTimeout','clearTimeout','tick','release','metaData',source+`
 meta=metaData; mapReady=true; $('preview-chunks').checked=true;
 ${mapStub}
+const fresh=requestPreview(map.bounds(),viewVersion); await tick();
+release({data:{scenes:[]}}); await fresh;
+assert.equal(map.fresh,true,'Full-cell preview response refreshes member versions');
 const previous=requestPreview(map.bounds(),viewVersion); await tick();
 await changeRecipe('procedural-pastel-v1');
 release({data:{scenes:[{id:'old',status:'completed',members:['old'],model:{asset_id:'scene-old'}}]}});
@@ -165,12 +168,13 @@ document.hidden=true; await pollPreview(); document.hidden=false;
 release({data:{id:'queued',status:'completed',members:['current'],model:{asset_id:'scene-current'}}});
 await pending;
 assert.equal(map.scenes[0].status,'completed','Pending preview scenes are polled to completion');
+assert.equal(map.fresh,false,'Immutable status polling cannot overwrite newer member observations');
 previewScenes=[{id:'late-2d',status:'queued'}];
 const late=pollPreview(); await tick(); changeView(false);
 release({data:{id:'late-2d',status:'completed'}}); await late;
 assert.deepEqual(map.scenes,[],'Switching to 2D rejects a late chunk status');
 `)(assert,document,previewFetch,{href:'http://localhost/index.php'},()=>{},()=>{},tick,value=>releasePreview(value),metaData);
-assert.equal(previewRequests.length,3,'Polling is paused while hidden and never overlaps');
+assert.equal(previewRequests.length,4,'Polling is paused while hidden and never overlaps');
 assert.equal(previewRequests[0].options.headers['X-CSRF-Token'],'csrf-test');
 console.log('PASS frontend: preview cancellation / polling / hidden pause / shared view guards / CSRF');
 

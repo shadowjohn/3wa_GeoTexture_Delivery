@@ -21,17 +21,18 @@ const flush = async () => {
 const collection = (count = 200, prefix = 'a') => ({type: 'FeatureCollection', features: Array.from({length: count}, (_, i) => ({
   type: 'Feature', id: String(i),
   geometry: {type: 'Polygon', coordinates: [[[121+i*.0001,25],[121+i*.0001+.00005,25],[121+i*.0001,25.00005],[121+i*.0001,25]]]},
-  properties: {build_id: String(i), height: 12, status: 'completed', model: {
+  properties: {source_key: 'fixture', source_hash: 'hash', build_id: String(i), height: 12, status: 'completed', model: {
     asset_id: prefix + i.toString(16).padStart(31, '0'), url: `api.php?action=model&asset_id=${prefix}${i}`,
-    longitude: 121+i*.0001, latitude: 25, surfaces: [{large: 'not sent to map worker'}],
+    longitude: 121+i*.0001, latitude: 25, resident_bytes: 2*1024*1024, style_key: 'procedural-tw-v1', surfaces: [{large: 'not sent to map worker'}],
   }},
 }))});
 function workspace(width = 1000) {
   const map = new MapWorkspace({onError: error => map.errors.push(error)});
   map.errors = []; map.added = []; map.removed = []; map.center = {lng: 121, lat: 25};
   map.e8 = {addItem: model => map.added.push(model), removeItem: model => map.removed.push(model), enable3D() {}, disable3D() {}};
+  map.bounds = [120,24,122,26];
   map.native = {getContainer: () => ({clientWidth: width}), getCenter: () => map.center, easeTo() {},
-    getBounds: () => ({getWest: () => 120, getEast: () => 122, getSouth: () => 24, getNorth: () => 26})};
+    getBounds: () => ({getWest: () => map.bounds[0], getEast: () => map.bounds[2], getSouth: () => map.bounds[1], getNorth: () => map.bounds[3]})};
   map.putLayer = (id, data) => {
     const layer = {data, setVisible() { return this; }}; map.layers.set(id, layer); return layer;
   };
@@ -60,8 +61,8 @@ assert.equal(map.layers.get('buildings-unprocessed-3d'), unchangedWhite, 'Unchan
 assert.equal(map.models.size, 64, 'Resident textured model budget');
 assert.equal(whiteCount(map), 136, 'Buildings outside texture budget still render as white models');
 map.center = {lng: 121.0199, lat: 25}; map.syncModels(); map.renderBuildings();
-assert.equal(map.removed.length, 64, 'Moving releases the old GPU models');
-assert.equal(whiteCount(map), 200, 'New nearby models replace white only when ready');
+assert.equal(map.removed.length, 32, 'Moving keeps at most 32 extra ready singles');
+assert.equal(whiteCount(map), 168, 'Retained ready models stay visible while new nearby models load');
 await finish(map);
 map.set3D(false);
 assert.equal(map.models.size, 0, '2D releases resident models');
@@ -89,8 +90,13 @@ assert.equal(mobile.errors.length, 1);
 console.log('PASS map preview: nearest first / bounded transfers and GPU models / white fallback / late results / mobile');
 
 const scene = (data, id = 'chunk-a', members = data.features.map(f => f.properties.model.asset_id)) => ({
-  id, status: 'completed', members,
-  model: {asset_id: `scene-${id}`, url: `api.php?action=scene_file&id=${id}`, longitude: 121, latitude: 25},
+  id, status: 'completed', members, recipe_key: 'procedural-tw-v1',
+  member_versions: data.features.filter(f => members.includes(f.properties.model.asset_id)).map(f => ({
+    source_key: f.properties.source_key, build_id: f.properties.build_id, source_hash: f.properties.source_hash,
+    recipe_key: 'procedural-tw-v1', asset_id: f.properties.model.asset_id,
+    longitude: f.properties.model.longitude, latitude: f.properties.model.latitude,
+  })),
+  model: {asset_id: `scene-${id}`, url: `api.php?action=scene_file&id=${id}`, longitude: 121, latitude: 25, resident_bytes: 4*1024*1024},
 });
 const chunked = workspace();
 let counts;
@@ -136,7 +142,81 @@ for (const [width, chunks, singles, transfers] of [[1000, 8, 20, 4], [390, 4, 24
   await finish(bounded);
   assert.equal([...bounded.models.keys()].filter(id => id.startsWith('scene-')).length, chunks);
   assert.equal(bounded.models.size, chunks + singles, 'Chunk and single GPU budgets remain separate and bounded');
-  bounded.setScenes([]); await finish(bounded);
-  assert.equal(bounded.models.size, width < 600 ? 24 : 64, 'Clearing stale scenes restores bounded singles');
+  bounded.setChunksEnabled(false); bounded.setScenes([]); await finish(bounded);
+  assert.equal(bounded.models.size, width < 600 ? 36 : 84, 'Disabling chunks restores active singles with bounded existing retention');
 }
 console.log('PASS chunks: ready replacement / building counts / current asset versions / failure / 2D / shared budgets');
+
+const nearby = workspace(); nearby.bounds=[120.9998,24.9998,121.0002,25.0002];
+const one = collection(1); nearby.setBuildings(one); await finish(nearby);
+const original = nearby.models.get(one.features[0].properties.model.asset_id);
+nearby.bounds=[121.0003,24.9998,121.0007,25.0002]; nearby.center={lng:121.0005,lat:25};
+nearby.syncModels();
+assert.equal(nearby.models.get(original.assetId.replace('geotexture-','')), original, 'Nearby pan retains the real SDK instance');
+assert.equal(nearby.retainedModels.size,1);
+nearby.bounds=[120.9998,24.9998,121.0002,25.0002]; nearby.center={lng:121,lat:25}; nearby.setBuildings(one);
+assert.equal(nearby.added.length,1,'A -> B -> A does not download/recreate the same model');
+nearby.bounds=[121.02,25.02,121.03,25.03]; nearby.syncModels();
+assert.equal(nearby.models.size,0,'Leaving the retention ring releases the instance');
+
+const partial = workspace(); partial.setBuildings({...chunkData,features:chunkData.features.slice(0,2)}); await finish(partial);
+partial.setScenes([scene(chunkData,'boundary')]); await finish(partial);
+assert.equal(partial.coveredAssets.size,8,'Full immutable member snapshot supports a partially visible chunk');
+assert.equal(whiteCount(partial),0);
+const boundaryInstance=partial.models.get('scene-boundary');
+partial.setBuildings({...chunkData,features:chunkData.features.slice(4)});
+partial.setScenes([]); await finish(partial);
+assert.equal(partial.models.get('scene-boundary'),boundaryInstance,'Valid ready chunk survives query boundary changes');
+const changed=structuredClone(partial.collection); changed.features[0].properties.model=null;
+partial.setBuildings(changed);
+assert.ok(!partial.models.has('scene-boundary'),'Known missing/currently invalid asset invalidates the old chunk');
+
+const overlap=workspace(); overlap.setBuildings(chunkData); overlap.setScenes([scene(chunkData,'old')]); await finish(overlap);
+const oldChunk=overlap.models.get('scene-old');
+overlap.setScenes([scene(chunkData,'next',chunkData.features.slice(0,4).map(f=>f.properties.model.asset_id))]);
+assert.equal(overlap.models.get('scene-old'),oldChunk,'Keep valid old chunk while regrouped replacement loads');
+assert.equal(whiteCount(overlap),0);
+await finish(overlap);
+assert.ok(!overlap.models.has('scene-old'),'Ready replacement retires every overlapping old chunk');
+assert.equal(overlap.coveredAssets.size,4);
+assert.equal(overlap.models.size,5,'Uncovered members use singles; covered members are not rendered twice');
+
+for(const [width,maxBytes] of [[1000,64*1024*1024],[390,24*1024*1024]]){
+  const budget=workspace(width),data=collection(200);
+  data.features.forEach(f=>{f.properties.model.resident_bytes=20*1024*1024;});
+  budget.setBuildings(data);await finish(budget);budget.center={lng:121.0199,lat:25};budget.syncModels();await finish(budget);
+  const bytes=[...budget.retainedModels].reduce((n,id)=>n+budget.modelDescriptors.get(id).resident_bytes,0);
+  assert.ok(bytes<=maxBytes,'Extra retention obeys the decoded-memory estimate budget');
+  assert.equal(budget.retainedModels.size,Math.floor(maxBytes/(20*1024*1024)));
+  budget.setBuildings({type:'FeatureCollection',features:[]});await finish(budget);
+  assert.equal(budget.models.size,0,'Empty/source/style reset releases all residency');
+  assert.equal(budget.modelDescriptors.size,0,'Reset does not keep unbounded metadata');
+}
+const unknown=workspace();const unknownData=collection(1);unknownData.features[0].properties.model.resident_bytes=null;
+unknown.bounds=[120.9998,24.9998,121.0002,25.0002];unknown.setBuildings(unknownData);await finish(unknown);
+unknown.bounds=[121.0003,24.9998,121.0007,25.0002];unknown.syncModels();
+assert.equal(unknown.models.size,0,'Unknown decoded cost is not retained outside the active view');
+
+const versions=workspace();const pair=collection(2);const frozen=scene(pair,'frozen');
+versions.setBuildings(pair);versions.setScenes([frozen]);await finish(versions);
+const revised=structuredClone(pair);revised.features[0].properties.model.asset_id='new-version';revised.features[0].properties.source_hash='new-hash';
+versions.setBuildings(revised);await finish(versions);
+const latest=versions.models.get('new-version');
+versions.setBuildings({...pair,features:pair.features.slice(1)});await finish(versions);
+assert.equal(versions.models.get('new-version'),latest,'Known newer offscreen version stays resident');
+assert.ok(!versions.models.has('scene-frozen'),'Leaving the viewport cannot resurrect an old immutable scene snapshot');
+versions.setScenes([frozen]);await finish(versions);
+assert.ok(!versions.models.has('scene-frozen'),'Polling an old frozen snapshot does not overwrite newer observations');
+versions.setScenes([scene(revised,'fresh')],true);await finish(versions);
+assert.equal(versions.coveredAssets.size,2,'Fresh full-cell response can replace stale scene membership');
+versions.setBuildings({type:'FeatureCollection',features:[]});await finish(versions);
+assert.equal(versions.knownVersions.size,0,'Context reset clears bounded version observations');
+
+const simultaneous=workspace();simultaneous.setBuildings(chunkData);simultaneous.setScenes([scene(chunkData,'simultaneous')]);
+simultaneous.models.get([...simultaneous.pendingModels][0]).resolve();await flush();
+assert.ok(simultaneous.pendingModels.has('scene-simultaneous'));
+for(const id of simultaneous.pendingModels)simultaneous.models.get(id).resolve();
+await flush();
+assert.equal(simultaneous.models.size,1,'Singles and covering chunk resolving in the same microtask batch leave no duplicate models');
+assert.equal(simultaneous.pendingModels.size,0);
+console.log('PASS residency: round trip reuse / retention ring / byte budgets / boundary versions / overlap handoff / reset');

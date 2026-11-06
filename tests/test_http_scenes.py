@@ -22,12 +22,22 @@ def test_scene_permissions_snapshot_and_download(site, tmp_path):
     response = client.post(api, params={'action':'create_scene_export'}, json=body)
     assert response.status_code == 201, response.text
     scene = response.json()['data']
+    assert scene['recipe_key'] == RECIPE
+    assert len(scene['member_versions']) == 1
+    member = scene['member_versions'][0]
+    assert set(member) == {'source_key', 'build_id', 'source_hash', 'recipe_key', 'asset_id', 'longitude', 'latitude'}
+    assert member['build_id'] == 'HTTP1' and member['recipe_key'] == RECIPE
+    assert member['asset_id'] == scene['members'][0]
     assert client.get(api, params={'action':'scene_file','id':scene['id']}).status_code == 404
     env = dict(os.environ,GEOTEXTURE_STATE_DIR=str(tmp_path/'state'),GEOTEXTURE_SOURCE_DB=str(tmp_path/'source.sqlite'))
     run = subprocess.run(['php','cli/worker.php','--batch=1'],cwd=ROOT,env=env,capture_output=True,text=True,timeout=120)
     assert run.returncode == 0, run.stderr
     status = client.get(api, params={'action':'scene_status','id':scene['id']}).json()['data']
     assert status['status'] == 'completed', status
+    assert status['member_versions'] == scene['member_versions']
+    assert isinstance(status['model']['resident_bytes'], int) and status['model']['resident_bytes'] > 0
+    compact = client.get(api, params={'action': 'buildings', 'bbox': '121.4,25.17,121.401,25.171', 'recipe_key': RECIPE, 'detail': 'preview'}).json()['data']['features'][0]['properties']['model']
+    assert 'textures' not in compact and isinstance(compact['resident_bytes'], int) and compact['resident_bytes'] > 65536
     file = client.get(base + status['glb_url'])
     assert file.status_code == 200 and file.content[:4] == b'glTF'
     size = struct.unpack_from('<I',file.content,12)[0]
