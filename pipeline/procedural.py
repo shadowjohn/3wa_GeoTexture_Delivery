@@ -16,6 +16,7 @@ from pathlib import Path
 
 import numpy as np
 from PIL import Image, ImageDraw
+from shapely import set_precision
 from shapely.geometry import MultiPolygon, Polygon, Point, shape
 from shapely.ops import transform
 from shapely.affinity import scale
@@ -138,6 +139,8 @@ def _station_parts(request, height, lon, lat, polygons):
     mask = transform(lambda x, y, z=None: ((np.asarray(x)-lon)*k*math.cos(math.radians(lat)), (np.asarray(y)-lat)*k), mask)
     if width != 1:
         mask = scale(mask, xfact=width, yfact=width, origin='centroid')
+    # Sub-millimetre boolean slivers collapse in GLB float32; use a 1mm grid for station cuts.
+    mask = set_precision(mask, .001)
     parts = []
     def append(geometry, floor, boundary):
         if geometry.is_empty:
@@ -153,6 +156,7 @@ def _station_parts(request, height, lon, lat, polygons):
     cut_area = 0
     # shortcut: masks and 6m clearance are illustrative; replace with surveyed station geometry when available.
     for polygon in polygons:
+        polygon = set_precision(polygon, .001)
         cut = polygon.intersection(mask)
         cut_area += cut.area
         append(polygon.difference(mask), 0, polygon.boundary)
@@ -307,7 +311,7 @@ def generate_request(request, output_path):
                 if length <= EPS:
                     continue
                 top = height
-                if boundary is not None and boundary.distance(Point((a + b) / 2)) > 1e-6:
+                if boundary is not None and boundary.distance(Point((a + b) / 2)) > .002:
                     if base > 0:
                         continue
                     top = clearance

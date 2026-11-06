@@ -1,4 +1,4 @@
-import {MapWorkspace} from './map.mjs?v=bounded-preview-1';
+import {MapWorkspace} from './map.mjs?v=atlas-scene-1';
 import {qualityNotices} from './model-quality.mjs';
 
 const $ = id => document.getElementById(id);
@@ -7,7 +7,11 @@ const LABELS = {queued: '排隊中', preparing: '處理中', awaiting_converter:
 let mode = 'task', meta, map, mapReady = false, selectionVersion = 0, activeJob = null, inspectedJob = null;
 let viewRequest, viewTimer, jobsBusy = false, selectionBusy = false, operationBusy = false;
 let inspectedItems = [];
-let recipeKey = 'procedural-tw-v1';
+let recipeKey = 'procedural-tw-v1', sourceKey = 'new-taipei-8418', sourceBusy = false;
+let viewVersion = 0, previewVersion = 0, previewRequest, previewTimer, previewScenes = [];
+let sceneExport = null, sceneExportVersion = 0, scenePollRequest, sceneExportBusy = false;
+const scenePending = job => job && ['queued', 'running'].includes(job.status);
+const sourceLabel = key => meta?.sources?.[key]?.name ?? key;
 let jobRequestVersion = 0;
 let jobsVersion = 0, progressBusy = false, progressMapAt = 0, progressMapDirty = false;
 const jobsCache = new Map();
@@ -23,15 +27,16 @@ function message(text, error = false, target = 'selection-message') {
   if (target === 'map-message') $(target).hidden = !text;
 }
 
-async function api(action, {body, signal, params = {}} = {}) {
+async function api(action, {body, signal, params = {}, recipe = recipeKey, source = sourceKey} = {}) {
   const url = new URL('api.php', location.href);
   url.searchParams.set('action', action);
-  url.searchParams.set('recipe_key', recipeKey);
+  url.searchParams.set('recipe_key', recipe);
+  url.searchParams.set('source_key', source);
   for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value);
   const response = await fetch(url, {
     method: body ? 'POST' : 'GET', signal, credentials: 'same-origin',
     headers: body ? {'Content-Type': 'application/json', 'X-CSRF-Token': meta?.csrf_token ?? ''} : {},
-    body: body ? JSON.stringify({recipe_key: recipeKey, ...body}) : undefined,
+    body: body ? JSON.stringify({recipe_key: recipe, source_key: source, ...body}) : undefined,
   });
   if (response.status === 401) { location.assign('login.php'); throw new Error('登入已逾時，請重新登入。'); }
   if (action === 'export' && response.ok) return response;
@@ -51,11 +56,15 @@ function updateControls() {
   const completed = inspectedJob?.completed ?? collection?.features.filter(f => f.properties.status === 'completed').length ?? 0;
   const partial = inspectedJob?.partial ?? collection?.features.filter(f => f.properties.model?.texture_status === 'partial').length ?? 0;
   $('selection-ready').textContent = inspectedJob || collection ? `${number(completed)} 完整 · ${number(partial)} 部分` : '—';
-  $('create-job').disabled = !mapReady || selectionBusy || operationBusy || Boolean(map?.vertices) || Boolean(inspectedJob) || !count || incomplete;
+  $('create-job').disabled = !mapReady || sourceBusy || selectionBusy || operationBusy || Boolean(map?.vertices) || Boolean(inspectedJob) || !count || incomplete;
   $('download').disabled = $('create-job').disabled;
-  $('draw').disabled = !mapReady || selectionBusy || operationBusy || Boolean(map?.vertices);
+  $('draw').disabled = !mapReady || sourceBusy || selectionBusy || operationBusy || Boolean(map?.vertices);
   $('resume-selection').hidden = !inspectedJob;
-  $('recipe-key').disabled = selectionBusy || operationBusy || Boolean(map?.vertices);
+  $('recipe-key').disabled = sourceBusy || selectionBusy || operationBusy || Boolean(map?.vertices);
+  $('source-key').disabled = $('recipe-key').disabled || !meta?.sources;
+  $('station-location').disabled = !mapReady || sourceBusy || selectionBusy || operationBusy || Boolean(map?.vertices);
+  $('preview-chunks').disabled = !mapReady || sourceBusy || recipeKey === 'texture-v1';
+  $('create-scene-export').disabled = $('download').disabled || count > 2000 || recipeKey === 'texture-v1' || sceneExportBusy || Boolean(scenePending(sceneExport?.job));
   for (const button of document.querySelectorAll('[data-run]')) button.disabled=operationBusy || selectionBusy;
   $('mode-title').textContent = inspectedJob ? '檢視任務範圍' : mode === 'task' ? '建立處理範圍' : '框選匯出範圍';
   $('mode-hint').textContent = inspectedJob ? `目前顯示「${inspectedJob.name}」；返回目前框選後，才能建立任務或匯出。` : mode === 'task' ? '在地圖上畫 Polygon，選取要製作貼圖的建物。' : '重新畫 Polygon，匯出這個範圍的建物與已有成果。';
@@ -132,31 +141,142 @@ async function selectPolygon(polygon) {
 }
 
 async function loadView() {
-  if (!mapReady || !meta.source.ready) return;
+  if (!mapReady || sourceBusy || !meta.source.ready) return;
+  const version = ++viewVersion;
+  stopPreview();
   viewRequest?.abort();
   viewRequest = new AbortController();
   const signal = viewRequest.signal;
   if (map.native.getZoom() < 13) {
+    map.setScenes([]);
     map.setBuildings({type: 'FeatureCollection', features: []});
     $('visible-count').textContent = '請放大至街廓範圍載入建物';
     message('請放大地圖以載入建物。', false, 'map-message');
     return;
   }
+  const bbox = map.bounds();
   try {
-    const result = await api('buildings', {params: {bbox: map.bounds().join(','), limit: 2000, detail: 'preview'}, signal});
-    if (signal.aborted) return;
+    const result = await api('buildings', {params: {bbox: bbox.join(','), limit: 2000, detail: 'preview'}, signal});
+    if (signal.aborted || version !== viewVersion) return;
     map.setBuildings(result);
+    requestPreview(bbox, version);
     $('visible-count').textContent = `目前載入 ${number(result.features.length)} 棟${result.meta.truncated ? '（已達上限）' : ''}`;
     message(result.meta.truncated ? '目前視野超過 2,000 棟，請放大；建立任務仍會精確查詢所畫範圍。' : '', false, 'map-message');
   } catch (error) {
-    if (error.name !== 'AbortError') {
+    if (error.name !== 'AbortError' && version === viewVersion) {
       $('visible-count').textContent = '建物載入失敗';
       message(error.message, true, 'map-message');
     }
   }
 }
 
-function scheduleView() { clearTimeout(viewTimer); viewTimer = setTimeout(loadView, 200); }
+function scheduleView() {
+  ++viewVersion; viewRequest?.abort(); stopPreview();
+  clearTimeout(viewTimer); viewTimer = setTimeout(loadView, 200);
+}
+
+function stopPreview(clear = false) {
+  ++previewVersion; previewRequest?.abort(); previewRequest = null;
+  clearTimeout(previewTimer); previewScenes = [];
+  if (clear) { map?.setScenes([]); message('', false, 'preview-status'); }
+}
+
+function previewEnabled() {
+  return mapReady && map.threeD && recipeKey !== 'texture-v1' && $('preview-chunks').checked;
+}
+
+function applyPreview(scenes) {
+  previewScenes = scenes;
+  map.setScenes(scenes);
+  const pending = scenes.filter(scenePending).length;
+  const failed = scenes.filter(scene => ['failed', 'cancelled'].includes(scene.status)).length;
+  message(pending ? `${pending} 個街廓背景準備中，可能等候約一分鐘；目前保留個別建物。`
+    : failed ? '部分街廓未完成，保留個別建物預覽。' : scenes.length ? '街廓已備妥，載入完成後自動接替個別建物。' : '', false, 'preview-status');
+}
+
+async function requestPreview(bbox, version) {
+  if (!previewEnabled() || document.hidden) return;
+  const generation = previewVersion, request = new AbortController();
+  previewRequest = request;
+  try {
+    // Tilted map bounds extend far beyond the camera target; prioritize its actual center.
+    const center=map.native.getCenter();
+    const result = await api('preview_scenes', {body: {bbox, center:[center.lng,center.lat]}, signal: request.signal});
+    if (request.signal.aborted || generation !== previewVersion || version !== viewVersion || !previewEnabled()) return;
+    applyPreview(result.scenes);
+  } catch (error) {
+    if (!request.signal.aborted && generation === previewVersion) message(`街廓預覽暫不可用，保留個別建物：${error.message}`, true, 'preview-status');
+  } finally {
+    if (previewRequest === request) { previewRequest = null; queuePreviewPoll(); }
+  }
+}
+
+function queuePreviewPoll() {
+  clearTimeout(previewTimer);
+  if (previewScenes.some(scenePending)) previewTimer = setTimeout(pollPreview, 3000);
+}
+
+async function pollPreview() {
+  if (previewRequest || !previewEnabled()) return;
+  if (document.hidden) { queuePreviewPoll(); return; }
+  const pending = previewScenes.filter(scenePending);
+  if (!pending.length) return;
+  const generation = previewVersion, request = new AbortController();
+  previewRequest = request;
+  try {
+    const updates = await Promise.all(pending.map(scene => api('scene_status', {params: {id: scene.id}, signal: request.signal})));
+    if (request.signal.aborted || generation !== previewVersion || !previewEnabled()) return;
+    applyPreview(previewScenes.map(scene => updates.find(update => update.id === scene.id) ?? scene));
+  } catch (error) {
+    if (!request.signal.aborted && generation === previewVersion) message(`街廓進度稍後重試：${error.message}`, true, 'preview-status');
+  } finally {
+    if (previewRequest === request) { previewRequest = null; queuePreviewPoll(); }
+  }
+}
+
+function clearViewContext(clearPolygons = false) {
+  ++viewVersion; viewRequest?.abort(); ++selectionVersion;
+  inspectedJob = null; activeJob = null; inspectedItems = [];
+  $('job-detail').hidden = true; $('building-detail').hidden = true;
+  for (const current of Object.values(modes)) { current.collection = null; if (clearPolygons) current.polygon = null; }
+  map?.setBuildings({type: 'FeatureCollection', features: []});
+  stopPreview(true);
+  if (mapReady) map.setSelection(modes[mode].polygon);
+}
+
+function updateSourceDescription() {
+  $('source-key').innerHTML = Object.entries(meta.sources ?? {}).map(([key, source]) => `<option value="${escape(key)}">${escape(source.name)}</option>`).join('');
+  $('source-key').value = sourceKey;
+  $('source-label').textContent = sourceLabel(sourceKey);
+  $('station-control').hidden = sourceKey !== 'taichung-8';
+  $('station-location').value = '';
+}
+
+async function changeSource(key, {locate = true} = {}) {
+  if (sourceBusy || selectionBusy || operationBusy || key === sourceKey) return;
+  const version = ++jobRequestVersion;
+  sourceKey = key; sourceBusy = true; clearViewContext(true); updateControls();
+  try {
+    const nextMeta = await api('meta');
+    if (version !== jobRequestVersion) return;
+    meta = nextMeta; updateSourceDescription();
+    if (locate && mapReady) map.home(meta.center, meta.zoom);
+    $('task-name').value = `${sourceLabel(sourceKey)}範圍`;
+    message(`已切換至${sourceLabel(sourceKey)}，請重新框選範圍。`);
+    if (!meta.source.ready) message(meta.source.error ?? '建物來源尚未就緒。', true, 'map-message');
+  } catch (error) { meta.source.ready = false; message(error.message, true, 'map-message'); }
+  finally { sourceBusy = false; updateControls(); scheduleView(); }
+}
+$('source-key').onchange = () => changeSource($('source-key').value);
+$('station-location').onchange = () => {
+  if (!mapReady || !$('station-location').value) return;
+  const [longitude, latitude] = $('station-location').value.split(',').map(Number);
+  map.home({longitude, latitude}, 18); changeView(true);
+};
+$('preview-chunks').onchange = () => {
+  map?.setChunksEnabled($('preview-chunks').checked);
+  stopPreview(true); if (mapReady) scheduleView();
+};
 
 function updateRecipeDescription() {
   const recipe=meta?.recipes?.[recipeKey];
@@ -166,15 +286,10 @@ function updateRecipeDescription() {
 }
 
 async function changeRecipe(key) {
-  if (selectionBusy || operationBusy) return;
+  if (sourceBusy || selectionBusy || operationBusy) return;
   recipeKey=key; updateRecipeDescription();
   ++jobRequestVersion;
-  viewRequest?.abort(); ++selectionVersion;
-  inspectedJob=null; activeJob=null;
-  $('job-detail').hidden=true; $('building-detail').hidden=true;
-  for (const current of Object.values(modes)) current.collection=null;
-  map?.setBuildings({type:'FeatureCollection',features:[]});
-  if (mapReady) map.setSelection(modes[mode].polygon);
+  clearViewContext();
   message(`已切換為${recipeLabel(recipeKey)}，地圖與匯出使用此風格。`);
   updateControls(); scheduleView();
   if (modes[mode].polygon && mapReady) await selectPolygon(modes[mode].polygon);
@@ -197,7 +312,7 @@ function remainingLabel(job) {
 function jobMarkup(job) {
   return `<article class="job" data-job-card="${job.id}">
     <div class="job-heading"><button type="button" class="job-link" data-job="${job.id}">${escape(job.name)}</button><span class="status ${job.status}">${LABELS[job.status] ?? job.status}</span></div>
-    <p class="job-meta">${escape(recipeLabel(job.recipe_key ?? 'texture-v1'))} · ${area(job.area_m2)} · ${number(job.total)} 棟 · ${escape(date(job.created_at))}</p>
+    <p class="job-meta">${escape(sourceLabel(job.source_key ?? 'new-taipei-8418'))} · ${escape(recipeLabel(job.recipe_key ?? 'texture-v1'))} · ${area(job.area_m2)} · ${number(job.total)} 棟 · ${escape(date(job.created_at))}</p>
     <div class="progress-label"><span>前置建檔</span><span data-count="prepared">${number(job.prepared)} / ${number(job.total)}</span></div>
     <progress data-bar="prepared" max="${Math.max(1, job.total)}" value="${job.prepared}" aria-label="前置建檔進度"></progress>
     <div class="progress-label"><span>貼皮成果</span><span data-count="completed">${completedLabel(job)}</span></div>
@@ -275,6 +390,10 @@ async function showJob(id, locate = true) {
   try {
     const job = await api('job', {params: {id}});
     if (requestVersion!==jobRequestVersion) return;
+    if (locate && job.source_key && job.source_key !== sourceKey) {
+      await changeSource(job.source_key, {locate: false});
+      if (jobRequestVersion !== requestVersion + 1 || sourceKey !== job.source_key || !meta.source.ready) return;
+    }
     activeJob = id;
     $('job-detail').hidden = false;
     inspectedItems = job.items ?? [];
@@ -297,7 +416,8 @@ async function showJob(id, locate = true) {
     if (locate && mapReady) {
       if (map.vertices) cancelDraw();
       if (job.recipe_key && job.recipe_key!==recipeKey) {
-        recipeKey=job.recipe_key; updateRecipeDescription(); viewRequest?.abort(); ++selectionVersion;
+        recipeKey=job.recipe_key; updateRecipeDescription();
+        ++viewVersion; viewRequest?.abort(); ++selectionVersion; stopPreview(true);
         for (const current of Object.values(modes)) current.collection=null;
         map.setBuildings({type:'FeatureCollection',features:[]}); scheduleView();
       }
@@ -315,6 +435,7 @@ function showBuilding(p) {
   const partial = model?.texture_status === 'partial';
   const synthetic = model?.appearance_kind === 'procedural';
   const notices = qualityNotices(model);
+  const correction = p.geometry_correction ?? model?.geometry_correction;
   const credits = (Array.isArray(model?.attribution) ? model.attribution : []).filter(a => a && /^\d+$/.test(a.image_id));
   $('building-detail').hidden = false;
   $('building-detail').innerHTML = `<h3>建物 ${escape(p.build_id)}</h3><dl>
@@ -322,6 +443,7 @@ function showBuilding(p) {
     <div><dt>成果狀態</dt><dd>${partial ? '部分貼皮' : p.status === 'completed' ? '已有成果' : LABELS[p.status] ?? escape(p.status)}</dd></div>
     ${model?.surfaces_total ? `<div><dt>已貼面數</dt><dd>${number(model.surfaces_textured)} / ${number(model.surfaces_total)}</dd></div>` : ''}</dl>
     ${synthetic ? `<p class="hint">${escape(model.style_label ?? recipeLabel(model.style_key))} · 程序化示意立面。輪廓與高度來自建物資料；窗戶、樓層分割與配色為生成外觀。</p>` : partial ? '<p class="hint">部分立面已有真實影像，缺面仍為白模；匯出會保留缺面與影像來源記錄。</p>' : model ? '<p class="hint">切換 3D 可查看實際成果模型。</p>' : '<p class="hint">尚無此風格的成果。3D 模式顯示原始高度白模。</p>'}
+    ${correction ? `<p class="hint">${escape(correction.name ?? '車站開口')}：${escape(correction.base_m)} 公尺示意淨空，非實測。開口以外保留落地量體。</p>` : ''}
     ${notices.length ? `<p class="inline-message error">試轉／待核對：${notices.map(escape).join('；')}。</p>` : ''}
     ${model?.asset_id ? `<a href="viewer.php?asset_id=${encodeURIComponent(model.asset_id)}" target="_blank" rel="noopener">獨立 GLB 預覽</a>` : ''}
     ${credits.length ? `<details><summary>Mapillary 影像來源 · CC BY-SA 4.0</summary>${credits.map(a => `<p><a href="https://www.mapillary.com/app/?pKey=${a.image_id}" target="_blank" rel="noopener">${escape(a.author?.username || a.image_id)}</a></p>`).join('')}<p>影像經立面投影與裁切。<a href="https://creativecommons.org/licenses/by-sa/4.0/" target="_blank" rel="noopener">授權條款</a></p></details>` : ''}`;
@@ -360,6 +482,7 @@ $('view-3d').onclick = () => changeView(true);
 function changeView(threeD) {
   if (!mapReady) return;
   map.set3D(threeD);
+  if (threeD) scheduleView(); else stopPreview(true);
   for (const [id, active] of [['view-2d', !threeD], ['view-3d', threeD]]) {
     $(id).classList.toggle('active', active);
     $(id).setAttribute('aria-pressed', String(active));
@@ -374,7 +497,7 @@ $('refresh-jobs').onclick = () => loadJobs({refreshMap: true});
 $('jobs').addEventListener('click', async event => {
   const button = event.target.closest('button');
   if (!button) return;
-  if (operationBusy || selectionBusy) return;
+  if (sourceBusy || operationBusy || selectionBusy) return;
   if (button.dataset.job) return showJob(button.dataset.job);
   if (button.dataset.run) {
     operationBusy=true; button.disabled=true; updateControls();
@@ -420,14 +543,83 @@ $('download').onclick = async () => {
   finally { operationBusy = false; updateControls(); }
 };
 
+function renderSceneExport() {
+  const context = sceneExport, job = context?.job;
+  $('scene-export-result').hidden = !context;
+  if (!context) return;
+  $('scene-export-context').textContent = `${sourceLabel(context.sourceKey)} · ${recipeLabel(context.recipeKey)} · ${area(polygonArea(context.polygon))} · ${context.createdAt}`;
+  $('scene-export-progress').value = job?.progress ?? 0;
+  $('cancel-scene-export').hidden = !scenePending(job);
+  $('cancel-scene-export').disabled = sceneExportBusy;
+  const status = job?.status;
+  message(job ? `${LABELS[status] ?? (status === 'running' ? '處理中' : status)} · ${job.progress}% · ${number(job.total)} 棟${job.error ? ` · ${job.error}` : scenePending(job) ? ' · 背景排程可能等候約一分鐘，可繼續操作地圖。' : ''}` : '正在建立整區匯出…', status === 'failed', 'scene-export-status');
+  for (const [id, url] of [['scene-glb-download', job?.glb_url], ['scene-zip-download', job?.download_url]]) {
+    $(id).hidden = status !== 'completed' || !url;
+    if (url && status === 'completed') $(id).href = url;
+    else $(id).removeAttribute('href');
+  }
+  updateControls();
+}
+
+$('create-scene-export').onclick = async () => {
+  if ($('create-scene-export').disabled) return;
+  const version = ++sceneExportVersion;
+  scenePollRequest?.abort(); scenePollRequest = null;
+  const context = {sourceKey, recipeKey, polygon: structuredClone(modes.export.polygon), createdAt: new Date().toLocaleString('zh-TW', {hour12: false}), job: null};
+  sceneExport = context; sceneExportBusy = true; renderSceneExport();
+  try {
+    const job = await api('create_scene_export', {body: {polygon: context.polygon}, recipe: context.recipeKey, source: context.sourceKey});
+    if (version !== sceneExportVersion || sceneExport !== context) return;
+    context.job = job;
+  } catch (error) {
+    if (version === sceneExportVersion) context.job = {status: 'failed', progress: 0, total: 0, error: error.message};
+  } finally {
+    if (version === sceneExportVersion) { sceneExportBusy = false; renderSceneExport(); }
+  }
+};
+
+async function pollSceneExport() {
+  if (document.hidden || sceneExportBusy || scenePollRequest || !scenePending(sceneExport?.job)) return;
+  const context = sceneExport, version = sceneExportVersion, request = new AbortController();
+  scenePollRequest = request;
+  try {
+    const job = await api('scene_status', {params: {id: context.job.id}, recipe: context.recipeKey, source: context.sourceKey, signal: request.signal});
+    if (request.signal.aborted || version !== sceneExportVersion || sceneExport !== context) return;
+    context.job = job; renderSceneExport();
+  } catch (error) {
+    if (!request.signal.aborted && version === sceneExportVersion) message(`整區匯出進度稍後重試：${error.message}`, true, 'scene-export-status');
+  } finally { if (scenePollRequest === request) scenePollRequest = null; }
+}
+
+$('cancel-scene-export').onclick = async () => {
+  if (sceneExportBusy || !scenePending(sceneExport?.job)) return;
+  const context = sceneExport, version = ++sceneExportVersion;
+  scenePollRequest?.abort(); scenePollRequest = null; sceneExportBusy = true; renderSceneExport();
+  try {
+    const job = await api('cancel_scene_export', {body: {id: context.job.id}, recipe: context.recipeKey, source: context.sourceKey});
+    if (version === sceneExportVersion && sceneExport === context) context.job = job;
+  } catch (error) {
+    if (version === sceneExportVersion) message(`取消失敗：${error.message}`, true, 'scene-export-status');
+    return;
+  } finally {
+    if (version === sceneExportVersion) { sceneExportBusy = false; updateControls(); $('cancel-scene-export').disabled = false; }
+  }
+  if (version === sceneExportVersion) renderSceneExport();
+};
+
 async function start() {
   try {
     meta = await api('meta');
-    updateRecipeDescription();
+    sourceKey = meta.source_key ?? sourceKey;
+    updateSourceDescription(); updateRecipeDescription();
     $('converter-note').textContent = '示意立面每分鐘自動轉換 · 實景貼皮沿用 CLI 試轉';
     loadJobs();
     setInterval(pollProgress,3000);
-    document.addEventListener('visibilitychange',()=>{ if (!document.hidden) pollProgress(); });
+    setInterval(pollSceneExport,3000);
+    document.addEventListener('visibilitychange',()=>{
+      if (!document.hidden) { pollProgress(); pollSceneExport(); if (mapReady) scheduleView(); }
+    });
+    window.addEventListener('pagehide', () => { viewRequest?.abort(); stopPreview(); scenePollRequest?.abort(); clearTimeout(viewTimer); });
     map = new MapWorkspace({onMove: scheduleView, onBuilding: showBuilding, onDraw: count => { $('finish').disabled = count < 3; }, onFinish: finishDraw, onError: text => message(text, true, 'map-message'), onModels: ({loaded, total, available}) => {
       $('model-progress').textContent = map.threeD && available ? `近處貼皮 ${loaded} / ${total} 棟${available > total ? ' · 移動或放大查看其他建物' : ''}` : '';
     }});

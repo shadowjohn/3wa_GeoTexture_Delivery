@@ -90,9 +90,9 @@ final class App {
         return $this->decorate($this->source()->query(Geometry::bbox($polygon), 10000, $polygon));
     }
 
-    private function completeSelection(array $polygon): array {
-        $collection = $this->source()->query(Geometry::bbox($polygon), 10000, $polygon);
-        if (!empty($collection['meta']['truncated'])) { throw new AppException('範圍超過 10000 棟上限，請縮小 Polygon 後重試；尚未儲存部分清單。', 422); }
+    private function completeSelection(array $polygon,int $limit=10000): array {
+        $collection = $this->source()->query(Geometry::bbox($polygon), $limit, $polygon);
+        if (!empty($collection['meta']['truncated'])) { throw new AppException('範圍超過 '.$limit.' 棟上限，請縮小 Polygon 後重試；尚未儲存部分清單。', 422); }
         if (count($collection['features']) === 0) { throw new AppException('範圍內沒有建物，請重新繪製 Polygon。', 422); }
         return $collection;
     }
@@ -260,7 +260,11 @@ final class App {
         $runner=null;
         try {
             $started=microtime(true);
-            if($jobId===null){$stats['scenes_processed']=$this->scenes()->runOne()?1:0;}
+            if($jobId===null){
+                $scenes=$this->scenes();$stats['scenes_processed']=0;
+                $sceneBudget=$timeBudget>0?min(15,$timeBudget/2):15;
+                while($stats['scenes_processed']<8 && microtime(true)-$started<$sceneBudget && $scenes->runOne()){$stats['scenes_processed']++;}
+            }
             // 先撤回遺失成果的完成狀態，再取有限批次；來源清單已在建立任務時凍結。
             $this->jobs();
             $rows = $this->rows("SELECT i.* FROM job_items i JOIN jobs j ON j.id=i.job_id WHERE i.status='queued' AND j.status IN ('queued','preparing')".($jobId!==null ? ' AND j.id=?' : '')." ORDER BY j.created_at,j.rowid,i.rowid LIMIT ?",$jobId!==null ? [$jobId,$batch] : [$batch]);
@@ -965,10 +969,10 @@ final class App {
         $python=$this->config['procedural_python'] ?? (getenv('GEOTEXTURE_PYTHON') ?: (is_executable($venv)?$venv:'python3'));
         return new SceneJobs($this->db,$this,$this->artifactDir.'/scenes',$python);
     }
-    public function previewScenes(array $bbox): array { return $this->scenes()->preview($bbox,$this->recipeKey); }
+    public function previewScenes(array $bbox,?array $center=null): array { return $this->scenes()->preview($bbox,$this->recipeKey,$center); }
     public function createSceneExport(array $polygon): array {
         $polygon=Geometry::validatePolygon($polygon);
-        return $this->scenes()->export($polygon,$this->decorate($this->completeSelection($polygon)),$this->recipeKey);
+        return $this->scenes()->export($polygon,$this->decorate($this->completeSelection($polygon,2000),true),$this->recipeKey);
     }
     public function sceneStatus(string $id): array { return $this->scenes()->status($id); }
     public function cancelSceneExport(string $id): array { return $this->scenes()->cancel($id); }

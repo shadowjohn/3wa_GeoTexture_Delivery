@@ -87,3 +87,56 @@ assert.equal(mobile.models.size, 23);
 assert.equal(whiteCount(mobile), 177, 'Failed model retains the original white building');
 assert.equal(mobile.errors.length, 1);
 console.log('PASS map preview: nearest first / bounded transfers and GPU models / white fallback / late results / mobile');
+
+const scene = (data, id = 'chunk-a', members = data.features.map(f => f.properties.model.asset_id)) => ({
+  id, status: 'completed', members,
+  model: {asset_id: `scene-${id}`, url: `api.php?action=scene_file&id=${id}`, longitude: 121, latitude: 25},
+});
+const chunked = workspace();
+let counts;
+chunked.onModels = value => { counts = value; };
+const chunkData = collection(8);
+chunked.setBuildings(chunkData); await finish(chunked);
+chunked.setScenes([scene(chunkData)]);
+assert.equal(chunked.models.size, 9, 'Original models stay until the chunk is ready');
+assert.equal(chunked.coveredAssets.size, 0);
+assert.equal(counts.loaded, 8, 'Progress counts buildings, not the pending chunk');
+const chunkModel = chunked.models.get('scene-chunk-a');
+chunkModel.resolve(); await flush();
+assert.equal(chunked.models.size, 1, 'A ready chunk retires every covered single model');
+assert.equal(whiteCount(chunked), 0, 'Ready chunk replacement never flashes white buildings');
+assert.deepEqual(counts, {loaded: 8, total: 8, available: 8});
+assert.equal(chunked.layers.get('buildings-pick').data.features.length, 8, 'Merged buildings retain interactive footprints');
+chunked.setBuildings(collection(8, 'c'));
+assert.ok(chunked.removed.includes(chunkModel), 'Replacing current asset versions invalidates the entire old chunk');
+assert.equal(chunked.coveredAssets.size, 0);
+assert.equal(whiteCount(chunked), 8);
+await finish(chunked);
+chunked.setScenes([scene(chunked.collection, 'chunk-b')]);
+const lateChunk = chunked.models.get('scene-chunk-b');
+chunked.set3D(false); lateChunk.resolve(); await flush();
+assert.equal(chunked.models.size, 0, 'Late chunks must not reappear in 2D');
+assert.equal(chunked.coveredAssets.size, 0);
+
+const failedChunk = workspace(); failedChunk.setBuildings(chunkData); await finish(failedChunk);
+failedChunk.setScenes([scene(chunkData, 'failed')]);
+failedChunk.models.get('scene-failed').reject(new Error('invalid chunk')); await flush();
+assert.equal(failedChunk.models.size, 8, 'A failed chunk retains all loaded originals');
+assert.equal(failedChunk.coveredAssets.size, 0);
+assert.equal(whiteCount(failedChunk), 0);
+failedChunk.setChunksEnabled(false);
+assert.ok([...failedChunk.wantedModels.keys()].every(id => !id.startsWith('scene-')));
+
+const budgetData = collection(100);
+const scenes = Array.from({length: 10}, (_, i) => scene(budgetData, `budget-${i}`, budgetData.features.slice(i * 10, (i + 1) * 10).map(f => f.properties.model.asset_id)));
+for (const [width, chunks, singles, transfers] of [[1000, 8, 20, 4], [390, 4, 24, 2]]) {
+  const bounded = workspace(width);
+  bounded.scenes = scenes; bounded.setBuildings(budgetData);
+  assert.equal(bounded.pendingModels.size, transfers, 'Chunks and singles share transfer concurrency');
+  await finish(bounded);
+  assert.equal([...bounded.models.keys()].filter(id => id.startsWith('scene-')).length, chunks);
+  assert.equal(bounded.models.size, chunks + singles, 'Chunk and single GPU budgets remain separate and bounded');
+  bounded.setScenes([]); await finish(bounded);
+  assert.equal(bounded.models.size, width < 600 ? 24 : 64, 'Clearing stale scenes restores bounded singles');
+}
+console.log('PASS chunks: ready replacement / building counts / current asset versions / failure / 2D / shared budgets');

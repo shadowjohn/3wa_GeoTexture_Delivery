@@ -63,7 +63,8 @@ try {
     switch ($action) {
         case 'preview_scenes':
             if(!is_array($input['bbox'] ?? null)){throw new InvalidArgumentException('缺少 bbox');}
-            respondJson(['data'=>$app->previewScenes($input['bbox'])]);
+            if(isset($input['center']) && !is_array($input['center'])){throw new InvalidArgumentException('預覽中心格式無效');}
+            respondJson(['data'=>$app->previewScenes($input['bbox'],$input['center'] ?? null)]);
         case 'create_scene_export': respondJson(['data'=>$app->createSceneExport($polygon())],201);
         case 'cancel_scene_export': respondJson(['data'=>$app->cancelSceneExport($sceneId())]);
         case 'scene_status': respondJson(['data'=>$app->sceneStatus($sceneId())]);

@@ -49,13 +49,20 @@ final class SceneJobs {
         // Paths are private implementation details, never part of identity or API output.
         $identity=$request;foreach ($identity['entries'] as &$entry) { unset($entry['path']); }unset($entry);
         $id=hash('sha256',$this->json($identity));$request['scene_id']=$id;$now=gmdate('c');
-        $existing=$this->sql('SELECT status FROM scene_jobs WHERE id=?',[$id])->fetchColumn();
-        if ($existing===false) {
-            if ((int)$this->sql("SELECT COUNT(*) FROM scene_jobs WHERE status IN ('queued','running')")->fetchColumn()>=100) { throw new AppException('區塊工作排隊中，請稍後重試',429); }
-            $this->sql("INSERT OR IGNORE INTO scene_jobs VALUES(?,?,?,'queued',0,'queued',NULL,NULL,?,?)",[$id,$request['kind'],$this->json($request),$now,$now]);
-        } elseif ($retry && in_array($existing,['failed','cancelled'],true)) {
-            $this->sql("UPDATE scene_jobs SET status='queued',progress=0,phase='queued',error=NULL,updated_at=? WHERE id=? AND status IN ('failed','cancelled')",[$now,$id]);
-        }return $this->status($id);
+        $encoded=$this->json($request);
+        $this->db->exec('BEGIN IMMEDIATE');
+        try {
+            $existing=$this->sql('SELECT status,phase FROM scene_jobs WHERE id=?',[$id])->fetch();
+            $queue=!$existing || ($retry && in_array($existing['status'],['failed','cancelled'],true))
+                || ($request['kind']==='preview' && $existing['status']==='cancelled' && $existing['phase']==='expired');
+            if($queue) {
+                if((int)$this->sql("SELECT COUNT(*) FROM scene_jobs WHERE status IN ('queued','running')")->fetchColumn()>=100){throw new AppException('區塊工作排隊中，請稍後重試',429);}
+                if(!$existing){$this->sql("INSERT INTO scene_jobs VALUES(?,?,?,'queued',0,'queued',NULL,NULL,?,?)",[$id,$request['kind'],$encoded,$now,$now]);}
+                else{$this->sql("UPDATE scene_jobs SET status='queued',progress=0,phase='queued',error=NULL,output_json=NULL,updated_at=? WHERE id=?",[$now,$id]);}
+            }
+            $this->db->exec('COMMIT');
+        }catch(Throwable $error){$this->db->exec('ROLLBACK');throw $error;}
+        return $this->status($id);
     }
     public function export(array $polygon,array $collection,string $recipe): array {
         if (!Recipes::procedural($recipe)) { throw new InvalidArgumentException('整區 GLB 目前支援三種示意立面風格'); }
@@ -69,12 +76,14 @@ final class SceneJobs {
     }
     private static function xy(float $lon,float $lat): array { return [6378137*deg2rad($lon),6378137*log(tan(M_PI/4+deg2rad($lat)/2))]; }
     private static function ll(float $x,float $y): array { return [rad2deg($x/6378137),rad2deg(2*atan(exp($y/6378137))-M_PI/2)]; }
-    public function preview(array $bbox,string $recipe): array {
+    public function preview(array $bbox,string $recipe,?array $center=null): array {
         if (!Recipes::procedural($recipe)) { return ['scenes'=>[],'recipe_key'=>$recipe,'limit'=>8]; }
         BuildingSource::validateBbox($bbox);
         if (max(abs($bbox[1]),abs($bbox[3]))>85) { throw new InvalidArgumentException('區塊預覽緯度超出範圍'); }
+        if($center!==null && (!array_is_list($center) || count($center)!==2 || !is_numeric($center[0]) || !is_numeric($center[1]) || !is_finite((float)$center[0]) || !is_finite((float)$center[1]) || $center[0]<$bbox[0] || $center[0]>$bbox[2] || $center[1]<$bbox[1] || $center[1]>$bbox[3])){throw new InvalidArgumentException('預覽中心必須位於查詢範圍內');}
         [$west,$south]=self::xy($bbox[0],$bbox[1]);[$east,$north]=self::xy($bbox[2],$bbox[3]);
         $cx=($west+$east)/512;$cy=($south+$north)/512;$cells=[];
+        if($center!==null){[$fx,$fy]=self::xy((float)$center[0],(float)$center[1]);$cx=$fx/256;$cy=$fy/256;}
         // Only the nearest cells are candidates; do not scan a whole city for a preview.
         for($x=max((int)floor($west/256),(int)floor($cx)-4);$x<=min((int)floor($east/256),(int)floor($cx)+4);$x++) {
             for($y=max((int)floor($south/256),(int)floor($cy)-4);$y<=min((int)floor($north/256),(int)floor($cy)+4);$y++) { $cells[]=[$x,$y]; }
@@ -105,6 +114,16 @@ final class SceneJobs {
         if(!in_array($format,['glb','zip'],true)){throw new InvalidArgumentException('成果格式無效');}
         $r=$this->row($id);$out=json_decode($r['output_json'] ?? '{}',true);
         if($r['status']!=='completed' || !isset($out[$format])){throw new AppException('成果尚未完成',404);}
+        $request=json_decode($r['request_json'],true,512,JSON_THROW_ON_ERROR);
+        try {
+            foreach($request['entries'] as $entry) {
+                $source=$this->app->modelFile($entry['asset_id']);
+                if(!hash_equals($entry['sha256'],$source['sha256'])){throw new RuntimeException('凍結來源 SHA 不符');}
+            }
+        } catch(Throwable $error) {
+            $this->sql("UPDATE scene_jobs SET status='failed',phase='failed',error='原始成果已失效，請重新產生後匯出' WHERE id=? AND status='completed'",[$id]);
+            throw new AppException('原始成果不存在或已損壞，請重新產生後匯出',404);
+        }
         $path=$this->root.'/'.$id.'.'.$format;
         if(!is_file($path) || !hash_equals($out[$format],hash_file('sha256',$path))){
             $this->sql("UPDATE scene_jobs SET status='failed',phase='failed',error='區塊成果已損壞，請重新匯出' WHERE id=? AND status='completed'",[$id]);
@@ -115,7 +134,7 @@ final class SceneJobs {
     // Caller owns the shared worker flock; a running row here is an interrupted worker.
     public function runOne(): bool {
         $this->sql("UPDATE scene_jobs SET status='queued',phase='queued',progress=0 WHERE status='running'");
-        $this->sql("UPDATE scene_jobs SET status='cancelled',phase='expired' WHERE kind='preview' AND status='queued' AND created_at<?",[gmdate('c',time()-900)]);
+        $this->sql("UPDATE scene_jobs SET status='cancelled',phase='expired' WHERE kind='preview' AND status='queued' AND updated_at<?",[gmdate('c',time()-900)]);
         $row=$this->sql("SELECT * FROM scene_jobs WHERE status='queued' ORDER BY CASE kind WHEN 'export' THEN 0 ELSE 1 END,created_at,rowid LIMIT 1")->fetch();
         if(!$row){return false;}$id=$row['id'];$work=null;
         $this->sql("UPDATE scene_jobs SET status='running',phase='loading',updated_at=? WHERE id=? AND status='queued'",[gmdate('c'),$id]);

@@ -44,3 +44,37 @@ def test_invalid_clearance_and_identity():
     for field,value in [('base_m',15),('base_m',0),('base_m',float('nan')),('width_scale',0),('width_scale',True),('source_key','new-taipei-8418'),('build_id','other')]:
         req=request();req['feature']['properties']['geometry_correction'][field]=value
         with tempfile.TemporaryDirectory() as d, pytest.raises(ValueError): procedural.generate_request(req,Path(d)/'x.glb')
+
+
+def test_boolean_slivers_remain_drawable_in_float32():
+    req=request()
+    req['feature']['properties']['geometry_correction']['geometry']['coordinates']=[ring([(1e-7,-5),(12,-5),(12,25),(1e-7,25)])]
+    with tempfile.TemporaryDirectory() as d:
+        out=Path(d)/'sliver.glb';procedural.generate_request(req,out);doc,bin=parse_glb(out)
+        for primitive in doc['meshes'][0]['primitives']:
+            p=accessor(doc,bin,primitive['attributes']['POSITION']).astype(float)
+            idx=accessor(doc,bin,primitive['indices']).ravel()
+            for span in primitive['extras']['surface_ranges']:
+                triangles=p[idx[span['index_offset']:span['index_offset']+span['index_count']]].reshape(-1,3,3)
+                assert sum(np.linalg.norm(np.cross(t[1]-t[0],t[2]-t[0]))/2 for t in triangles)>0
+
+
+def test_diagonal_outer_walls_reach_source_roof_after_snapping():
+    req=request()
+    req['feature']['geometry']['coordinates']=[ring([(0,0),(20,7.123),(20,27.123),(0,20)])]
+    height,lon,lat,rings,polygons=procedural._source(req)
+    boundary=polygons[0].boundary
+    from shapely.geometry import Point
+    with tempfile.TemporaryDirectory() as d:
+        out=Path(d)/'diagonal.glb';procedural.generate_request(req,out);doc,bin=parse_glb(out)
+        wall=doc['meshes'][0]['primitives'][0]
+        p=accessor(doc,bin,wall['attributes']['POSITION']).astype(float)
+        idx=accessor(doc,bin,wall['indices']).ravel()
+        checked=0
+        for span in wall['extras']['surface_ranges']:
+            points=p[idx[span['index_offset']:span['index_offset']+span['index_count']]]
+            center=points.mean(axis=0)
+            if boundary.distance(Point(center[0],-center[2]))<.002:
+                assert max(points[:,1])==height
+                checked+=1
+        assert checked>=8

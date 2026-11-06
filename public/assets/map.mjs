@@ -34,6 +34,9 @@ export class MapWorkspace {
     this.failedModels = new Set();
     this.wantedModels = new Map();
     this.assets = new Set();
+    this.scenes = [];
+    this.chunksEnabled = true;
+    this.coveredAssets = new Set();
     this.collection = empty();
     this.vertices = null;
     this.draftCursor = null;
@@ -144,11 +147,26 @@ export class MapWorkspace {
     this.renderBuildings();
   }
 
+  setScenes(scenes) {
+    this.scenes = scenes;
+    this.syncModels();
+    this.renderBuildings(true);
+  }
+
+  setChunksEnabled(enabled) {
+    this.chunksEnabled = enabled;
+    this.syncModels();
+    this.renderBuildings(true);
+  }
+
   renderBuildings(modelsOnly = false) {
     // 大型模型品質紀錄不送進 MapLibre worker；點擊時從原集合取得詳情。
     const displayFeature = f => ({type: f.type, id: f.id, geometry: f.geometry, properties: {
       build_id: f.properties.build_id, height: f.properties.height, status: f.properties.status,
     }});
+    if (!modelsOnly) this.putLayer('buildings-pick', {type: 'FeatureCollection', features: this.collection.features.map(displayFeature)}, {
+      render: 'fill', color: '#ffffff', opacity: 0.001, interactive: true, above3D: true,
+    }).setVisible(this.threeD);
     const roofLayerIds = new Set();
     for (const [status, color] of Object.entries(COLORS)) {
       const features = this.collection.features.filter(f => (f.properties.status ?? 'unprocessed') === status);
@@ -156,7 +174,7 @@ export class MapWorkspace {
           render: 'fill', color, opacity: 0.7, interactive: true,
         }).setVisible(!this.threeD);
       // 等模型真正 ready 才移除白模，載入失敗、超過預覽額度仍保留建物。
-      const whiteModels = features.filter(f => !this.readyModels.has(f.properties.model?.asset_id)).map(displayFeature);
+      const whiteModels = features.filter(f => !this.readyModels.has(f.properties.model?.asset_id) && !this.coveredAssets.has(f.properties.model?.asset_id)).map(displayFeature);
       const whiteKey = JSON.stringify(whiteModels.map(f => f.properties.build_id));
       if (modelsOnly && this.whiteLayerKeys.get(status) === whiteKey) {
         for (const id of this.roofLayerIds) if (id.startsWith(`buildings-${status}-roof-`)) roofLayerIds.add(id);
@@ -182,25 +200,35 @@ export class MapWorkspace {
       }
     }
     this.roofLayerIds = roofLayerIds;
-    this.onModels({loaded: this.readyModels.size, total: this.wantedModels.size,
-      available: this.collection.features.filter(f => f.properties.model).length});
+    const available = this.collection.features.filter(f => f.properties.model).map(f => f.properties.model.asset_id);
+    const wanted = new Set([...this.wantedModels.values()].flatMap(info => info.members ?? [info.asset_id]));
+    this.onModels({loaded: available.filter(id => this.readyModels.has(id) || this.coveredAssets.has(id)).length,
+      total: available.filter(id => wanted.has(id)).length, available: available.length});
   }
 
   syncModels() {
     const small = this.native.getContainer().clientWidth < 600;
     this.modelConcurrency = small ? 2 : 4;
-    let candidates = [];
+    let candidates = [], chunks = [];
     if (this.threeD) {
       const center = this.native.getCenter(), bounds = this.native.getBounds();
       const longitudeScale = Math.cos(center.lat * Math.PI / 180);
+      const available = new Set(this.collection.features.map(f => f.properties.model?.asset_id).filter(Boolean));
       candidates = this.collection.features.map(f => f.properties.model).filter(info => info
         && info.longitude >= bounds.getWest() && info.longitude <= bounds.getEast()
         && info.latitude >= bounds.getSouth() && info.latitude <= bounds.getNorth());
+      const visible = new Set(candidates.map(info => info.asset_id));
       const distance = info => ((info.longitude - center.lng) * longitudeScale) ** 2 + (info.latitude - center.lat) ** 2;
       candidates.sort((a, b) => distance(a) - distance(b) || a.asset_id.localeCompare(b.asset_id));
+      // shortcut: 邊界街廓成員不全時保留個別模型；需要跨視野載入時再加入完整版本查詢。
+      if (this.chunksEnabled) chunks = this.scenes.filter(scene => scene.status === 'completed' && scene.model
+        && scene.members?.length && scene.members.every(id => available.has(id)) && scene.members.some(id => visible.has(id)))
+        .map(scene => ({...scene.model, members: scene.members}))
+        .sort((a, b) => distance(a) - distance(b)).slice(0, small ? 4 : 8);
     }
-    // 每棟有兩張貼圖，限制常駐 GPU 資源；移動視野時卸載遠處並替換近處。
-    const wanted = new Map(candidates.slice(0, small ? 24 : 64).map(info => [info.asset_id, info]));
+    this.coveredAssets = new Set(chunks.filter(info => this.readyModels.has(info.asset_id)).flatMap(info => info.members));
+    const singles = candidates.filter(info => !this.coveredAssets.has(info.asset_id)).slice(0, small ? 24 : 64);
+    const wanted = new Map([...chunks, ...singles].map(info => [info.asset_id, info]));
     this.wantedModels = wanted;
     for (const [id, model] of this.models) {
       if (!wanted.has(id) && !this.pendingModels.has(id)) this.removeModel(id, model);
@@ -239,7 +267,10 @@ export class MapWorkspace {
         this.pendingModels.add(id);
         model.ready.then(() => {
           if (this.destroyed) return;
-          if (this.wantedModels.has(id)) this.readyModels.add(id);
+          if (this.wantedModels.has(id)) {
+            this.readyModels.add(id);
+            this.syncModels();
+          }
           else this.removeModel(id, model);
         }, error => {
           if (this.destroyed) return;
