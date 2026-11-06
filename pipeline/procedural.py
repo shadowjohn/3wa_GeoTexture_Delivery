@@ -234,6 +234,9 @@ def generate_request(request, output_path):
     glb.doc['materials'][wall_material]['pbrMetallicRoughness']['roughnessFactor'] = (
         .48 if request['recipe_key'] == 'procedural-modern-v1' else .88)
     glb.doc['samplers'][0].update({'wrapS': 10497, 'wrapT': 10497, 'minFilter': 9987})
+    groups = {kind: _group(material, {'kind': kind, 'textured': kind != 'base',
+                                     'required_texture': kind != 'base', 'surface_ranges': []})
+              for kind, material in [('wall', wall_material), ('roof', roof_material), ('base', base_material)]}
     surfaces = []
     for pi, (rings, polygon, triangles) in enumerate(zip(rings_by_polygon, polygons, triangles_by_polygon)):
         for ri, ring in enumerate(rings):
@@ -243,21 +246,22 @@ def generate_request(request, output_path):
                 edge = b - a
                 length = float(np.linalg.norm(edge))
                 key = f'source:p{pi}:r{ri}:e{ei}'
-                group = _group(wall_material, {'kind': 'wall', 'wall_key': key,
-                                               'textured': True, 'required_texture': True})
+                group = groups['wall']
+                index_offset = len(group['indices'])
                 normal = [sign * edge[1] / length, 0, sign * edge[0] / length]
                 points = [[a[0], 0, -a[1]], [b[0], 0, -b[1]],
                           [b[0], height, -b[1]], [a[0], height, -a[1]]]
                 # Align floor bands from ground level for every wall, independent of width.
                 u, v = length / repeat[0], height / repeat[1]
                 _quad(group, points, normal, [[0, 0], [u, 0], [u, -v], [0, -v]], sign < 0)
-                glb.primitive(group)
+                group['extras']['surface_ranges'].append({'key': key, 'index_offset': index_offset,
+                                                         'index_count': len(group['indices']) - index_offset})
                 surfaces.append({'key': key, 'kind': 'wall', 'textured': True, 'area_m2': length * height,
                                  'geometric_coverage': 1, 'coverage': 1})
-        for kind, y, direction, material in [('roof', height, 1, roof_material), ('base', 0, -1, base_material)]:
+        for kind, y, direction in [('roof', height, 1), ('base', 0, -1)]:
             key = f'{kind}:p{pi}'
-            group = _group(material, {'kind': kind, 'surface_key': key, 'textured': kind == 'roof',
-                                      'required_texture': kind == 'roof'})
+            group = groups[kind]
+            index_offset = len(group['indices'])
             for triangle in triangles:
                 xy = list(triangle.exterior.coords)[:3]
                 area2 = sum(xy[i][0] * xy[(i + 1) % 3][1] - xy[(i + 1) % 3][0] * xy[i][1] for i in range(3))
@@ -269,10 +273,13 @@ def generate_request(request, output_path):
                 group['indices'].extend([start, start + 1, start + 2])
                 if kind == 'roof':
                     group['uvs'].extend([[x / 8, -north / 8] for x, north in xy])
-            glb.primitive(group)
+            group['extras']['surface_ranges'].append({'key': key, 'index_offset': index_offset,
+                                                     'index_count': len(group['indices']) - index_offset})
             if kind == 'roof':
                 surfaces.append({'key': key, 'kind': 'roof', 'textured': True, 'area_m2': polygon.area,
                                  'geometric_coverage': 1, 'coverage': 1})
+    for group in groups.values():
+        glb.primitive(group)
     walls = sum(s['kind'] == 'wall' for s in surfaces)
     metadata = {k: request[k] for k in ('source_key', 'build_id', 'source_hash', 'recipe_key')}
     metadata.update({'version': 1, 'appearance_kind': 'procedural', 'verification_status': 'synthetic',

@@ -140,10 +140,10 @@ class ProceduralTests(unittest.TestCase):
             normals = accessor(doc, binary, primitive['attributes']['NORMAL'])
             indices = accessor(doc, binary, primitive['indices']).reshape(-1, 3)
             np.testing.assert_allclose(np.linalg.norm(normals, axis=1), 1, atol=1e-6)
-            for triangle in positions[indices]:
+            for triangle, triangle_indices in zip(positions[indices], indices):
                 n = np.cross(triangle[1] - triangle[0], triangle[2] - triangle[0])
                 n /= np.linalg.norm(n)
-                self.assertGreater(float(np.dot(n, normals[indices[0, 0]])), .999)
+                self.assertGreater(float(np.dot(n, normals[triangle_indices[0]])), .999)
             if extra['kind'] == 'base':
                 self.assertFalse(extra['textured'])
                 self.assertFalse(extra['required_texture'])
@@ -158,21 +158,26 @@ class ProceduralTests(unittest.TestCase):
             if extra['kind'] == 'roof':
                 np.testing.assert_allclose(positions[:, 1], 14.4, atol=1e-6)
                 continue
-            walls.append(extra['wall_key'])
             wall_materials.add(primitive['material'])
             self.assertEqual(float(positions[:, 1].min()), 0)
             self.assertAlmostEqual(float(positions[:, 1].max()), 14.4, places=5)
-            uv = accessor(doc, binary, primitive['attributes']['TEXCOORD_0'])
-            width = float(np.linalg.norm(positions[1] - positions[0]))
-            self.assertGreaterEqual(width / float(np.ptp(uv[:, 0])), 4)
-            self.assertLessEqual(width / float(np.ptp(uv[:, 0])), 9)
-            self.assertGreaterEqual(14.4 / float(np.ptp(uv[:, 1])), 5)
-            self.assertLessEqual(14.4 / float(np.ptp(uv[:, 1])), 8)
-            center = positions.mean(axis=0)
-            outside = center + normals[0] * .05
-            inside = center - normals[0] * .05
-            self.assertFalse(footprint.contains(Point(outside[0], -outside[2])))
-            self.assertTrue(footprint.contains(Point(inside[0], -inside[2])))
+            uvs = accessor(doc, binary, primitive['attributes']['TEXCOORD_0'])
+            for surface in extra['surface_ranges']:
+                walls.append(surface['key'])
+                offset = surface['index_offset']
+                selected = np.unique(indices.flatten()[offset:offset + surface['index_count']])
+                wall_positions, uv = positions[selected], uvs[selected]
+                width = float(np.linalg.norm(wall_positions[1] - wall_positions[0]))
+                self.assertGreaterEqual(width / float(np.ptp(uv[:, 0])), 4)
+                self.assertLessEqual(width / float(np.ptp(uv[:, 0])), 9)
+                self.assertGreaterEqual(14.4 / float(np.ptp(uv[:, 1])), 5)
+                self.assertLessEqual(14.4 / float(np.ptp(uv[:, 1])), 8)
+                center = wall_positions.mean(axis=0)
+                outside = center + normals[selected[0]] * .05
+                inside = center - normals[selected[0]] * .05
+                self.assertFalse(footprint.contains(Point(outside[0], -outside[2])))
+                self.assertTrue(footprint.contains(Point(inside[0], -inside[2])))
+        self.assertEqual(len(walls), manifest['walls_total'])
         self.assertEqual(len(walls), len(set(walls)))
         self.assertEqual(len(wall_materials), 1)
 
