@@ -30,4 +30,6 @@
 - 既有前端 drawing/progress、map preview、model quality 測試通過。這階段沒有變更前端程式。
 - 規格審查修正了實景 partial 進度與單檔介面的相容性；保留 regression checks。
 
+已透過既有 worker lock 將 `d1dc196` 快轉部署到 `codex/php-map-task-mvp`。部署後 app/procedural 測試通過；09:14 UTC 的自動排程在約 3 秒內準備 100 棟實景輸入，沒有失敗。首頁導向登入、未登入的進度 API 回應 401，資料庫、Git 與 worktree 路徑回應 403。正式密碼與來源資料未變更。
+
 後續依既定順序處理同材質 primitive 合併、逐面來源對照，再處理共用圖集與區塊預覽。實景與合成立面的品質標示繼續分開。

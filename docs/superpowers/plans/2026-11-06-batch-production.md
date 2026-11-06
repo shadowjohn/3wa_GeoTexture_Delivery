@@ -28,5 +28,5 @@
 
 - [x] Benchmark old and new worker on identical private state snapshots and immutable hard-linked model files. Source stays read-only; no benchmark writes reach the production artifact directory. Compare the same batch size and count valid completed artifacts, wall time and process starts.
 - [x] Review the combined diff for spec compliance, then correctness/security. Address material findings and rerun affected checks.
-- [ ] Acquire existing worker flock before integrating the verified commit into the deployed branch; release without removing the lock file. Confirm normal cron output, authenticated HTTP behavior, incremental progress and syntax/modes (new PHP 0755).
-- [ ] Update docs with measured results and complete this plan. Continue the approved roadmap with a separate plan for geometry/material batching; keep its implementation independent of this queue change.
+- [x] Acquire existing worker flock before integrating the verified commit into the deployed branch; release without removing the lock file. Confirm normal cron output, authenticated HTTP behavior, incremental progress and syntax/modes (new PHP 0755).
+- [x] Update docs with measured results and complete this plan. Continue the approved roadmap with a separate plan for geometry/material batching; keep its implementation independent of this queue change.
