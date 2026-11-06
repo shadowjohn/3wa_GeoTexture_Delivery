@@ -42,7 +42,7 @@ Files: public/assets/map.mjs, public/assets/app.mjs, public/index.php, public/as
 - [x] Read combined diff, spec and correctness review; resolve material findings only. Verify auth/CSRF/paths/hash/cancel and original API compatibility.
 - [x] Build a real temporary block using existing immutable assets, measure old versus shared-atlas primitives, GPU textures/pixels, model bytes and fixed-scene browser timings. Open ZIP whole_block.glb independently and compare map origins, holes, heights, IDs and missing list.
 - [x] Use local authenticated fixture with Playwright to exercise real E8 chunk load/fallback/style switching and export polling/download. Keep production credentials untouched.
-- [ ] Document behavior, bounds and measurements; deploy under existing worker flock, check modes/HTTP/cron and a bounded production scene request. Commit verified changes and report concrete usage plus remaining limitations.
+- [x] Document behavior, bounds and measurements; deploy under existing worker flock, check modes/HTTP/cron and a bounded production scene request. Commit verified changes and report concrete usage plus remaining limitations.
 
 ## Approved station and editable export refinement
 

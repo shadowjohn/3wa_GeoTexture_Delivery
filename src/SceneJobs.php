@@ -139,7 +139,7 @@ final class SceneJobs {
         if(!$row){return false;}$id=$row['id'];$work=null;
         $this->sql("UPDATE scene_jobs SET status='running',phase='loading',updated_at=? WHERE id=? AND status='queued'",[gmdate('c'),$id]);
         try {
-            if(!is_dir($this->root) && !mkdir($this->root,0755,true)){throw new RuntimeException('無法建立區塊目錄');}
+            if(!is_dir($this->root) && (!mkdir($this->root,0755,true) || !chmod($this->root,0755))){throw new RuntimeException('無法建立區塊目錄');}
             $work=$this->root.'/.work-'.$id.'-'.bin2hex(random_bytes(4));mkdir($work,0755);chmod($work,0755);
             $request=json_decode($row['request_json'],true,512,JSON_THROW_ON_ERROR);
             foreach($request['entries'] as &$entry){$file=$this->app->modelFile($entry['asset_id']);if(!hash_equals($entry['sha256'],$file['sha256'])){throw new RuntimeException('來源模型版本已改變');}$entry['path']=$file['path'];}unset($entry);

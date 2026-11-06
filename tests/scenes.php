@@ -17,7 +17,9 @@ try {
  $job=$app->createJob('test',$polygon);$app->runBatch(2,$job['id']);
  $queued=$app->createSceneExport($polygon);ok($queued['status']==='queued' && $queued['total']===2,'Freeze only two ready inputs');
  ok($app->createSceneExport($polygon)['id']===$queued['id'],'Same inputs reuse job');
- $app->runBatch(1);$done=$app->sceneStatus($queued['id']);ok($done['status']==='completed','Background export completes: '.json_encode($done));
+ $mask=umask(0077);try{$app->runBatch(1);}finally{umask($mask);}
+ ok((fileperms($tmp.'/state/artifacts/scenes') & 0777)===0755,'Scene directory stays web-traversable under restrictive worker umask');
+ $done=$app->sceneStatus($queued['id']);ok($done['status']==='completed','Background export completes: '.json_encode($done));
  $zip=new ZipArchive();$zip->open($app->sceneFile($done['id'],'zip')['path']);
  $manifest=json_decode($zip->getFromName('manifest.json'),true);
  ok($manifest['missing']===1 && $manifest['completed']===2,'Frozen missing list survives later processing');
