@@ -11,6 +11,7 @@ import io
 import json
 import math
 import random
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -207,6 +208,12 @@ def generate(input_path, output_path):
     if input_path.stat().st_size > MAX_INPUT_BYTES:
         raise ValueError('procedural input exceeds size limit')
     request = json.loads(input_path.read_text(encoding='utf-8-sig'))
+    return generate_request(request, output_path)
+
+
+def generate_request(request, output_path):
+    """Generate from an in-memory request using the same validation and bytes."""
+    output_path = Path(output_path).resolve()
     height, lon, lat, rings_by_polygon, polygons = _source(request)
     # Triangulate before creating output, preserving concavities and courtyard holes.
     triangles_by_polygon = [_triangles(polygon) for polygon in polygons]
@@ -295,11 +302,41 @@ def generate(input_path, output_path):
     return {'model_path': str(output_path), 'manifest_path': str(manifest_path), **manifest}
 
 
+def _batch():
+    while True:
+        line = sys.stdin.buffer.readline(MAX_INPUT_BYTES + 1)
+        if not line:
+            return 0
+        if len(line) > MAX_INPUT_BYTES:
+            print(json.dumps({'ok': False, 'error': 'procedural input exceeds size limit'}), flush=True)
+            return 1
+        try:
+            item = json.loads(line)
+            if not isinstance(item, dict):
+                raise ValueError('batch item must be an object')
+            output = item.get('output_path')
+            if not isinstance(output, str) or not Path(output).is_absolute() or Path(output).suffix != '.glb':
+                raise ValueError('output_path must be an absolute .glb path')
+            generate_request(item.get('request'), output)
+            result = {'ok': True}
+        except Exception as error:
+            # A malformed or failed item must not prevent later buildings from running.
+            result = {'ok': False, 'error': (str(error) or type(error).__name__)[:512]}
+        print(json.dumps(result), flush=True)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description='Generate explicitly synthetic facades on real building geometry')
-    parser.add_argument('input_path', type=Path)
-    parser.add_argument('output_path', type=Path)
+    parser.add_argument('input_path', type=Path, nargs='?')
+    parser.add_argument('output_path', type=Path, nargs='?')
+    parser.add_argument('--batch', action='store_true', help='read bounded NDJSON requests from stdin')
     args = parser.parse_args(argv)
+    if args.batch:
+        if args.input_path is not None or args.output_path is not None:
+            parser.error('--batch cannot be combined with input_path or output_path')
+        parser.exit(_batch())
+    if args.input_path is None or args.output_path is None:
+        parser.error('input_path and output_path are required unless --batch is used')
     try:
         result = generate(args.input_path, args.output_path)
     except (ValueError, OSError) as error:
