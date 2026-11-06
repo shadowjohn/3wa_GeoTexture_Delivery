@@ -36,4 +36,6 @@ Draw Call 減少約 77.5%。100 棟中原本 58 個 primitive 的代表建物，
 - PHP app 116 checks、procedural 登錄／匯出、batch worker、HTTP 整合。新測試包含 malformed ranges、重算 hash 後的越界／缺段／重疊／非整數與合法分段但面積不符的拒絕，以及舊格式接受。
 - 既有成果保留；新生成或重新轉換的模型採用合併格式。沒有為更新排程批量重做已完成的模型，也沒有改變使用者風格選擇。
 
+已在 worker lock 保護下部署 `b0d47cf`。部署後正式佇列的五棟建物全部完成，耗時 1.84 秒，逐一讀取登錄 GLB 確認都是三個 primitive；進度由 5 增至 10。部署後 app/procedural 測試與 PHP 語法檢查通過。
+
 共用圖集、分塊預覽、整區 GLB、外觀 v2 與可信實景校準仍屬後續工作，未在這次幾何分組中混入。
