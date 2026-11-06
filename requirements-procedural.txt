@@ -1,0 +1,4 @@
+# Minimal offline facade generator dependencies; constrained roof triangulation needs Shapely 2.1+.
+numpy>=1.26,<3
+Pillow>=10,<14
+Shapely>=2.1,<3

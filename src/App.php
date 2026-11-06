@@ -21,10 +21,13 @@ final class App {
         $this->config = $config;
         $this->stateDir = rtrim($config['state_dir'], '/\\');
         $this->artifactDir = rtrim($config['artifact_dir'] ?? $this->stateDir . '/artifacts', '/\\');
-        $this->recipeKey = $config['recipe_key'] ?? 'texture-v1';
+        $this->recipeKey = Recipes::validate($config['recipe_key'] ?? 'texture-v1');
         $this->directory($this->stateDir);
         $this->directory($this->artifactDir);
-        $this->db = new PDO('sqlite:' . $this->stateDir . '/app.sqlite', null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION, PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC]);
+        $dbPath=$this->stateDir.'/app.sqlite';
+        if (is_file($dbPath)) { @chmod($dbPath,0660); }
+        $this->db = new PDO('sqlite:' . $dbPath, null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION, PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC]);
+        @chmod($dbPath,0660);
         $this->db->exec('PRAGMA busy_timeout=5000');
         $this->db->exec('PRAGMA foreign_keys=ON');
         $this->db->exec('PRAGMA journal_mode=WAL');
@@ -61,6 +64,7 @@ final class App {
             'source' => ['ready' => $meta !== null && ($meta['ready'] ?? true), 'name' => $meta['name'] ?? '新北市建物 8418', 'error' => $this->sourceError],
             'center' => $this->config['center'] ?? ['longitude' => 121.41798, 'latitude' => 25.175544],
             'zoom' => $this->config['zoom'] ?? 15, 'converter_ready' => false, 'csrf_token' => null,
+            'recipes' => Recipes::all(), 'recipe_key' => $this->recipeKey,
         ];
     }
 
@@ -69,9 +73,9 @@ final class App {
         return $this->source;
     }
 
-    public function buildings(array $bbox, int $limit = 2000): array {
+    public function buildings(array $bbox, int $limit = 2000, bool $preview = false): array {
         if ($limit < 1 || $limit > 10000) { throw new InvalidArgumentException('limit 必須介於 1 到 10000'); }
-        return $this->decorate($this->source()->query($bbox, $limit));
+        return $this->decorate($this->source()->query($bbox, $limit), $preview);
     }
 
     public function selection(array $polygon): array {
@@ -113,6 +117,33 @@ final class App {
         return array_map(fn(array $r) => $this->job($r['id'], false), $rows);
     }
 
+    public function progress(): array {
+        // 輪詢只聚合資料庫進度，不逐棟讀取／驗證 GLB，也不傳回完整幾何。
+        $jobs=$this->rows("SELECT j.id,j.status,j.total,j.recipe_key,j.updated_at,
+            SUM(CASE WHEN i.prepared_at IS NOT NULL OR i.status IN ('completed','partial') THEN 1 ELSE 0 END) AS prepared,
+            SUM(CASE WHEN i.status='completed' THEN 1 ELSE 0 END) AS completed,
+            SUM(CASE WHEN i.status='partial' THEN 1 ELSE 0 END) AS partial,
+            SUM(CASE WHEN i.status='failed' THEN 1 ELSE 0 END) AS failed,
+            SUM(CASE WHEN i.status='queued' THEN 1 ELSE 0 END) AS queued,
+            SUM(CASE WHEN i.status='completed' AND i.prepared_at IS NULL THEN 1 ELSE 0 END) AS skipped
+            FROM jobs j LEFT JOIN job_items i ON i.job_id=j.id
+            GROUP BY j.id ORDER BY j.created_at DESC,j.rowid DESC",[]);
+        foreach ($jobs as &$job) {
+            foreach (['total','prepared','completed','partial','failed','queued','skipped'] as $key) { $job[$key]=(int)$job[$key]; }
+        }
+        unset($job);
+        $running=false;
+        $path=$this->stateDir.'/worker.lock';
+        $lock=is_file($path) ? @fopen($path,'r') : false;
+        if ($lock) {
+            $wouldBlock=0;
+            if (flock($lock,LOCK_EX|LOCK_NB,$wouldBlock)) { flock($lock,LOCK_UN); }
+            else { $running=(bool)$wouldBlock; }
+            fclose($lock);
+        }
+        return ['jobs'=>$jobs,'worker_running'=>$running,'checked_at'=>gmdate('c')];
+    }
+
     public function job(string $id, bool $withItems = true): array {
         $job = $this->jobRow($id);
         $rows = $this->rows('SELECT * FROM job_items WHERE job_id=? ORDER BY rowid', [$id]);
@@ -128,7 +159,9 @@ final class App {
             $status = $row['status'];
             if ($asset && !$this->isPartial($asset)) { $status = 'completed'; }
             elseif ($asset && !in_array($status,['queued','failed'],true)) { $status = 'partial'; }
-            elseif (!$asset && in_array($status,['completed','partial'],true)) { $status = $row['prepared_at'] ? 'prepared' : 'queued'; }
+            elseif (!$asset && (in_array($status,['completed','partial'],true) || ($status==='prepared' && Recipes::procedural($row['recipe_key'])))) {
+                $status = Recipes::procedural($row['recipe_key']) ? 'queued' : ($row['prepared_at'] ? 'prepared' : 'queued');
+            }
             if ($status !== $row['status'] || ($asset['asset_id'] ?? null) !== $row['asset_id']) {
                 $this->statement('UPDATE job_items SET status=?,asset_id=?,reused=? WHERE job_id=? AND source_key=? AND build_id=?',[$status,$asset['asset_id'] ?? null,$asset && !$this->isPartial($asset) && !$row['prepared_at'] ? 1 : 0,$id,$row['source_key'],$row['build_id']]);
             }
@@ -189,22 +222,29 @@ final class App {
         return $this->job($id);
     }
 
-    public function runBatch(int $batch = 100): array {
+    public function runBatch(int $batch = 100, ?string $jobId = null, float $timeBudget = 0): array {
         if ($batch < 1 || $batch > 10000) { throw new InvalidArgumentException('batch 必須介於 1 到 10000'); }
+        if ($jobId!==null) { $this->jobRow($jobId); }
         $lock = fopen($this->stateDir . '/worker.lock','c');
         if (!$lock) { throw new RuntimeException('無法開啟 worker lock'); }
-        $stats = ['locked'=>false,'processed'=>0,'prepared'=>0,'failed'=>0,'converter_ready'=>false];
+        $stats = ['locked'=>false,'processed'=>0,'prepared'=>0,'failed'=>0,'completed'=>0,'converter_ready'=>false];
         if (!flock($lock,LOCK_EX|LOCK_NB)) { fclose($lock); $stats['locked']=true; return $stats; }
         try {
             // 先撤回遺失成果的完成狀態，再取有限批次；來源清單已在建立任務時凍結。
             $this->jobs();
-            $rows = $this->rows("SELECT i.* FROM job_items i JOIN jobs j ON j.id=i.job_id WHERE i.status='queued' AND j.status IN ('queued','preparing') ORDER BY j.created_at,j.rowid,i.rowid LIMIT ?",[$batch]);
+            $rows = $this->rows("SELECT i.* FROM job_items i JOIN jobs j ON j.id=i.job_id WHERE i.status='queued' AND j.status IN ('queued','preparing')".($jobId!==null ? ' AND j.id=?' : '')." ORDER BY j.created_at,j.rowid,i.rowid LIMIT ?",$jobId!==null ? [$jobId,$batch] : [$batch]);
+            $started=microtime(true);
             foreach ($rows as $row) {
+                if ($timeBudget>0 && microtime(true)-$started>=$timeBudget) { break; }
                 if (!in_array($this->jobRow($row['job_id'])['status'],['queued','preparing'],true)) { continue; }
                 try {
-                    $this->prepareInput($row);
-                    $changed = $this->statement("UPDATE job_items SET status='prepared',prepared_at=?,error=NULL WHERE job_id=? AND source_key=? AND build_id=? AND status='queued' AND EXISTS(SELECT 1 FROM jobs j WHERE j.id=job_id AND j.status IN ('queued','preparing'))",[$this->now(),$row['job_id'],$row['source_key'],$row['build_id']])->rowCount();
+                    $inputPath=$this->prepareInput($row);
+                    if (Recipes::procedural($row['recipe_key'])) {
+                        $this->generateProcedural($row,$inputPath);
+                    }
+                    $changed = $this->statement("UPDATE job_items SET status=CASE WHEN status='queued' THEN 'prepared' ELSE status END,prepared_at=?,error=NULL WHERE job_id=? AND source_key=? AND build_id=? AND status IN ('queued','completed') AND EXISTS(SELECT 1 FROM jobs j WHERE j.id=job_id AND j.status<>'cancelled')",[$this->now(),$row['job_id'],$row['source_key'],$row['build_id']])->rowCount();
                     $stats['prepared'] += $changed;
+                    if (Recipes::procedural($row['recipe_key'])) { $stats['completed']+=$changed; }
                 } catch (Throwable $e) {
                     $changed = $this->statement("UPDATE job_items SET status='failed',error=? WHERE job_id=? AND source_key=? AND build_id=? AND status='queued' AND EXISTS(SELECT 1 FROM jobs j WHERE j.id=job_id AND j.status<>'cancelled')",[$e->getMessage(),$row['job_id'],$row['source_key'],$row['build_id']])->rowCount();
                     $stats['failed'] += $changed;
@@ -218,7 +258,7 @@ final class App {
         } finally { flock($lock,LOCK_UN); fclose($lock); }
     }
 
-    private function prepareInput(array $row): void {
+    private function prepareInput(array $row): string {
         $dir = $this->stateDir . '/inputs';
         $this->directory($dir);
         $key = hash('sha256',$this->json([$row['source_key'],$row['build_id'],$row['source_hash'],$row['recipe_key']]));
@@ -229,6 +269,26 @@ final class App {
         try {
             if (file_put_contents($temp,$this->json($input),LOCK_EX) === false || !rename($temp,$target)) { throw new RuntimeException('無法儲存前置資料'); }
         } finally { if (is_file($temp)) { unlink($temp); } }
+        return $target;
+    }
+
+    private function generateProcedural(array $row, string $inputPath): void {
+        $dir=$this->artifactDir.'/procedural-work'; $this->directory($dir);
+        $name=bin2hex(random_bytes(12));
+        $path=$dir.'/'.$name.'.glb'; $manifest=$dir.'/'.$name.'.manifest.json';
+        $venv=dirname(__DIR__).'/.venv-procedural/bin/python';
+        $python=$this->config['procedural_python'] ?? (getenv('GEOTEXTURE_PYTHON') ?: (is_executable($venv) ? $venv : 'python3'));
+        try {
+            ProceduralRunner::generate($inputPath,$path,$python);
+            if ($this->jobRow($row['job_id'])['status']==='cancelled') { return; }
+            $this->registerResult([
+                'source_key'=>$row['source_key'],'build_id'=>$row['build_id'],
+                'source_hash'=>$row['source_hash'],'recipe_key'=>$row['recipe_key'],
+                'path'=>'procedural-work/'.$name.'.glb','manifest_path'=>'procedural-work/'.$name.'.manifest.json',
+            ]);
+        } finally {
+            foreach ([$path,$manifest] as $file) { if (is_file($file)) { unlink($file); } }
+        }
     }
 
     public function registerResult(array $input): array {
@@ -249,7 +309,10 @@ final class App {
             catch (\JsonException $e) { throw new InvalidArgumentException('成果 manifest JSON 無效',0,$e); }
             if (!is_array($manifest) || array_is_list($manifest)) { throw new InvalidArgumentException('成果 manifest 必須為 object'); }
             $quality=$this->registrationQuality($manifest,$input,$path,$this->validateGlb($path,true));
-        } else { $this->validateGlb($path); }
+        } else {
+            if (Recipes::procedural($input['recipe_key'])) { throw new InvalidArgumentException('示意立面必須附上風格 manifest'); }
+            $this->validateGlb($path);
+        }
         $feature = json_decode($items[0]['feature_json'],true,512,JSON_THROW_ON_ERROR);
         $bbox = Geometry::bbox($feature['geometry']);
         $model = ['longitude'=>($bbox[0]+$bbox[2])/2,'latitude'=>($bbox[1]+$bbox[3])/2,'altitude'=>0.0,'heading'=>0.0,'scale'=>1.0];
@@ -263,6 +326,12 @@ final class App {
             }
         }
         $model+=$quality;
+        if (Recipes::procedural($input['recipe_key'])) {
+            $expected=['longitude'=>($bbox[0]+$bbox[2])/2,'latitude'=>($bbox[1]+$bbox[3])/2,'altitude'=>0,'heading'=>0,'scale'=>1];
+            foreach ($expected as $field=>$value) {
+                if (abs($model[$field]-$value)>1e-7) { throw new InvalidArgumentException('示意立面定位必須符合原始建物：'.$field); }
+            }
+        }
         if (abs($model['longitude'])>180 || abs($model['latitude'])>90 || $model['scale']<=0) { throw new InvalidArgumentException('模型位置或比例超出範圍'); }
         $id = bin2hex(random_bytes(16));
         $relative = 'models/'.$id.'.glb';
@@ -301,7 +370,9 @@ final class App {
     private function assetValid(array $row): bool {
         try {
             $path = $this->artifactPath($row['relative_path']);
-            $this->validateGlb($path);
+            // 登錄時已完整驗證網格。逐次核對同一份內容的 SHA-256，無須重解每個頂點。
+            // 不快取檢查結果，等長覆寫、遺失或損壞仍會在下次讀取時被拒絕。
+            clearstatcache(true,$path);
             return filesize($path) === (int)$row['size'] && hash_equals($row['sha256'],hash_file('sha256',$path));
         } catch (Throwable) { return false; }
     }
@@ -480,6 +551,8 @@ final class App {
     }
 
     private function registrationQuality(array $manifest, array $input, string $path, array $actual): array {
+        if (Recipes::procedural($input['recipe_key'])) { return $this->proceduralQuality($manifest,$input,$path,$actual); }
+        if (($manifest['appearance_kind'] ?? null)==='procedural') { throw new InvalidArgumentException('示意立面不可登錄為實景成果'); }
         if (($manifest['version'] ?? null)!==1) { throw new InvalidArgumentException('成果 manifest 版本無效'); }
         foreach (['source_key','build_id','source_hash','recipe_key'] as $field) {
             if (($manifest[$field] ?? null)!==$input[$field]) { throw new InvalidArgumentException('成果 manifest 來源版本不符：'.$field); }
@@ -580,6 +653,62 @@ final class App {
             $quality['engine_quality']['warnings']=$this->qualityFlags($engine['warnings'] ?? []);
         }
         return $quality;
+    }
+
+    private function proceduralQuality(array $manifest, array $input, string $path, array $actual): array {
+        if (($manifest['version'] ?? null)!==1 || ($manifest['appearance_kind'] ?? null)!=='procedural'
+            || ($manifest['verification_status'] ?? null)!=='synthetic'
+            || ($manifest['style_key'] ?? null)!==$input['recipe_key']
+            || ($manifest['texture_status'] ?? null)!=='complete') {
+            throw new InvalidArgumentException('示意立面 manifest 類型或風格無效');
+        }
+        foreach (['source_key','build_id','source_hash','recipe_key'] as $key) {
+            if (($manifest[$key] ?? null)!==$input[$key]) { throw new InvalidArgumentException('示意立面來源版本不符'); }
+        }
+        if (!is_string($manifest['model_sha256'] ?? null) || !hash_equals(hash_file('sha256',$path),$manifest['model_sha256'])) {
+            throw new InvalidArgumentException('示意立面模型 SHA 不符');
+        }
+        foreach (['surfaces_total','surfaces_textured','walls_total','walls_textured'] as $key) {
+            if (($manifest[$key] ?? null)!==$actual[$key]) { throw new InvalidArgumentException('示意立面面數不符'); }
+        }
+        if ($actual['walls_total']<3 || $actual['surfaces_total']<=$actual['walls_total']
+            || $actual['surfaces_total']!==$actual['surfaces_textured']) {
+            throw new InvalidArgumentException('示意立面必須完整包含外牆與屋頂貼圖');
+        }
+        if (!is_array($manifest['surfaces'] ?? null) || !array_is_list($manifest['surfaces']) || count($manifest['surfaces'])!==$actual['surfaces_total']) {
+            throw new InvalidArgumentException('示意立面缺少逐面資訊');
+        }
+        $seen=[]; $surfaces=[];
+        foreach ($manifest['surfaces'] as $surface) {
+            $key=$surface['key'] ?? null;
+            if (!is_string($key) || isset($seen[$key]) || !isset($actual['_surfaces'][$key])) { throw new InvalidArgumentException('示意立面 surface key 無效'); }
+            $real=$actual['_surfaces'][$key]; $seen[$key]=true;
+            if (($surface['kind'] ?? null)!==$real['kind'] || ($surface['textured'] ?? null)!==true
+                || !is_numeric($surface['area_m2'] ?? null) || !is_finite((float)$surface['area_m2'])
+                || abs((float)$surface['area_m2']-$real['area_m2'])>max(0.001,$real['area_m2']*0.001)
+                || ($surface['coverage'] ?? null)!=1 || ($surface['geometric_coverage'] ?? null)!=1
+                || abs($real['geometric_coverage']-1)>0.001) { throw new InvalidArgumentException('示意立面面積或覆蓋率不符'); }
+            $surfaces[]=['key'=>$key,'kind'=>$real['kind'],'textured'=>true,'area_m2'=>$real['area_m2'],'geometric_coverage'=>1.0,'coverage'=>1.0];
+        }
+        if (!is_array($manifest['textures'] ?? null) || !array_is_list($manifest['textures']) || !$manifest['textures']) { throw new InvalidArgumentException('示意立面缺少材質資訊'); }
+        $images=[];
+        foreach ($manifest['textures'] as $texture) {
+            $hash=$texture['embedded_sha256'] ?? null;
+            $image=is_string($hash) ? ($actual['_images'][$hash] ?? null) : null;
+            if (!$image || ($texture['width'] ?? null)!==$image['width'] || ($texture['height'] ?? null)!==$image['height']) { throw new InvalidArgumentException('示意立面圖片資訊不符'); }
+            $images[$hash]=['embedded_sha256'=>$hash,'width'=>$image['width'],'height'=>$image['height']];
+        }
+        if (count($images)!==count($actual['_images']) || ($manifest['up_axis'] ?? null)!=='Y' || ($manifest['forward_axis'] ?? null)!=='-Z') {
+            throw new InvalidArgumentException('示意立面材質或軸向資訊不符');
+        }
+        return [
+            'appearance_kind'=>'procedural','verification_status'=>'synthetic','style_key'=>$input['recipe_key'],
+            'style_label'=>Recipes::all()[$input['recipe_key']]['label'],'texture_status'=>'complete',
+            'up_axis'=>'Y','forward_axis'=>'-Z','attribution'=>[],
+            'surfaces_total'=>$actual['surfaces_total'],'surfaces_textured'=>$actual['surfaces_textured'],
+            'walls_total'=>$actual['walls_total'],'walls_textured'=>$actual['walls_textured'],
+            'surfaces'=>$surfaces,'textures'=>array_values($images),
+        ];
     }
 
     private function qualityScalars(array $input, array $strings, array $numbers): array {
@@ -733,8 +862,18 @@ final class App {
         return ['sha256'=>hash('sha256',$bytes),'width'=>$info[0],'height'=>$info[1]];
     }
 
-    private function model(array $asset): array {
-        return ['url'=>'api.php?action=model&asset_id='.rawurlencode($asset['asset_id'])] + json_decode($asset['model_json'],true,512,JSON_THROW_ON_ERROR) + ['asset_id'=>$asset['asset_id']];
+    private function model(array $asset, bool $preview = false): array {
+        $model=['url'=>'api.php?action=model&asset_id='.rawurlencode($asset['asset_id'])] + json_decode($asset['model_json'],true,512,JSON_THROW_ON_ERROR) + ['asset_id'=>$asset['asset_id']];
+        if ($preview) {
+            // 地圖只需定位與品質摘要；逐面紀錄仍保留於詳情、獨立預覽及匯出。
+            $warnings=$model['engine_quality']['warnings'] ?? [];
+            foreach ($model['wall_quality'] ?? [] as $wall) {
+                if (($wall['status'] ?? '')!=='missing') { $warnings=array_merge($warnings,$wall['flags'] ?? []); }
+            }
+            if ($warnings) { $model['engine_quality']['warnings']=array_values(array_unique($warnings)); }
+            unset($model['surfaces'],$model['textures'],$model['wall_quality']);
+        }
+        return $model;
     }
 
     public function modelFile(string $id): array {
@@ -744,12 +883,12 @@ final class App {
         return ['path'=>$this->artifactPath($asset['relative_path']),'name'=>$id.'.glb','sha256'=>$asset['sha256']];
     }
 
-    private function decorate(array $collection): array {
+    private function decorate(array $collection, bool $preview = false): array {
         foreach ($collection['features'] as &$feature) {
             $p = &$feature['properties'];
             $asset = $this->validAsset($p['source_key'],(string)$p['build_id'],$p['source_hash'],$this->recipeKey);
             $p['status'] = 'unprocessed'; $p['model'] = null;
-            if ($asset) { $p['status']=$this->isPartial($asset) ? 'queued' : 'completed'; $p['model']=$this->model($asset); }
+            if ($asset) { $p['status']=$this->isPartial($asset) ? 'queued' : 'completed'; $p['model']=$this->model($asset,$preview); }
             else {
                 $rows = $this->rows("SELECT i.status FROM job_items i JOIN jobs j ON j.id=i.job_id WHERE i.source_key=? AND i.build_id=? AND i.source_hash=? AND i.recipe_key=? AND j.status<>'cancelled'",[$p['source_key'],(string)$p['build_id'],$p['source_hash'],$this->recipeKey]);
                 foreach ($rows as $row) {

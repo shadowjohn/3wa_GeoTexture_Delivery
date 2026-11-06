@@ -119,6 +119,32 @@ $test('讀取 MultiPolygon 與多 Polygon collection', static function () use ($
     $expect(Geometry::bbox($geometry) === [121.0, 25.0, 122.1, 26.1]);
     $expect(Geometry::area($geometry) > 100000000);
 });
+$test('來源重複頂點正規化後保留外環內洞與多面', static function () use ($expect): void {
+    $clean = '((121 25,121.1 25,121.1 25.1,121 25.1,121 25),(121.02 25.02,121.04 25.02,121.04 25.04,121.02 25.02))';
+    $repeated = '((121 25,121 25,121.1 25,121.1 25,121.1 25.1,121 25.1,121 25,121 25),(121.02 25.02,121.04 25.02,121.04 25.02,121.04 25.04,121.02 25.02,121.02 25.02))';
+    foreach (['POLYGON%s', 'MULTIPOLYGON(%s,%s)', 'GEOMETRYCOLLECTION(POLYGON%s,POLYGON%s)'] as $format) {
+        $expected = Geometry::fromWkt(sprintf($format, $clean, $clean));
+        $actual = Geometry::fromWkt(sprintf($format, $repeated, $repeated));
+        $expect($actual === $expected, '相鄰重複點不得改變面與洞');
+    }
+});
+$test('來源建物 2RWWD7FETT 的連續重複頂點不再中斷讀取', static function () use ($expect): void {
+    $wkt = 'GEOMETRYCOLLECTION(POLYGON((121.4445125314453 25.16988004743165,121.4444929463501 25.16988210907488,121.4444817601887 25.16990519105584,121.4444737754102 25.16990550391913,121.4444122451309 25.17001697636454,121.4444327333716 25.17002594283899,121.4444670612197 25.17004058247239,121.4445086016919 25.17004712041449,121.4445371501641 25.16991741114868,121.4445371501641 25.16991741114868,121.4445125314453 25.16988004743165)))';
+    $geometry = Geometry::fromWkt($wkt);
+    $expect(count($geometry['coordinates'][0]) === 10);
+    $expect(Geometry::validatePolygon($geometry) === $geometry);
+    $expect(Geometry::area($geometry) > 0);
+});
+$test('來源去重仍拒絕退化未封閉與原始頂點超限', static function () use ($reject): void {
+    foreach ([
+        'POLYGON((121 25,121 25,121 25,121 25))',
+        'POLYGON((121 25,121.1 25,121.1 25,121 25))',
+        'POLYGON((121 25,121.1 25,121.1 25.1,121.1 25.1))',
+        'POLYGON((' . str_repeat('121 25,', 20000) . '121.1 25,121.1 25.1,121 25))',
+    ] as $wkt) {
+        $reject(static fn () => Geometry::fromWkt($wkt));
+    }
+});
 $test('拒絕畸形與非面 WKT', static function () use ($reject): void {
     foreach (['', 'POINT(121 25)', 'POLYGON EMPTY', 'POLYGON((121 25,122 25,121 25))',
         'POLYGON((121 25,122 25,122 26,121 25)) trailing',

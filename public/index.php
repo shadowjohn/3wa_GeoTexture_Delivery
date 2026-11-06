@@ -14,7 +14,7 @@ header('X-Content-Type-Options: nosniff');
   <title>GeoTexture Delivery</title>
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="https://3wa.tw/inc/javascript/easymap8/vendor/maplibre/maplibre-gl.css">
-  <link rel="stylesheet" href="assets/app.css">
+  <link rel="stylesheet" href="assets/app.css?v=bounded-preview-1">
 </head>
 <body>
   <header class="header">
@@ -31,6 +31,16 @@ header('X-Content-Type-Options: nosniff');
         <button type="button" id="task-tab" class="active" aria-pressed="true">處理任務</button>
         <button type="button" id="export-tab" aria-pressed="false">成果匯出</button>
       </nav>
+      <section class="style-panel" aria-label="建物外觀風格">
+        <label for="recipe-key">建物外觀</label>
+        <select id="recipe-key">
+          <?php foreach (\GeoTexture\Recipes::all() as $key=>$recipe): ?>
+          <option value="<?= htmlspecialchars($key, ENT_QUOTES, 'UTF-8') ?>"><?= htmlspecialchars($recipe['label'], ENT_QUOTES, 'UTF-8') ?></option>
+          <?php endforeach; ?>
+        </select>
+        <p id="recipe-description" class="hint">磁磚牆、窗框與樓層線，依真實輪廓產生示意立面。</p>
+        <span id="appearance-badge" class="appearance-badge">示意立面 · 非實景照片</span>
+      </section>
       <section class="selection-panel">
         <h2 id="mode-title">建立處理範圍</h2>
         <p class="hint" id="mode-hint">在地圖上畫 Polygon，選取要製作貼圖的建物。</p>
@@ -43,7 +53,7 @@ header('X-Content-Type-Options: nosniff');
           <button type="button" id="undo">退一步</button>
           <button type="button" id="cancel-draw">取消</button>
         </div>
-        <p id="draw-hint" class="hint" hidden>單擊加點，按「完成範圍」或雙擊結束。Esc 取消。</p>
+        <p id="draw-hint" class="hint" hidden>單擊加點，移動游標可預覽範圍；按「完成範圍」或雙擊結束。Esc 取消。</p>
         <dl class="range-summary">
           <div><dt>建物</dt><dd id="selection-count">尚未框選</dd></div>
           <div><dt>面積</dt><dd id="selection-area">—</dd></div>
@@ -59,22 +69,23 @@ header('X-Content-Type-Options: nosniff');
         <div id="export-panel" hidden>
           <p class="hint">匯出範圍獨立保存，可重新框選。ZIP 包含建物 GeoJSON、範圍、成果與缺漏清單。</p>
           <button type="button" id="download" class="primary full" disabled>下載範圍成果 ZIP</button>
-          <p class="hint">附上實際存在的完整與部分貼皮模型，並保留缺面、待核對品質與影像來源記錄。</p>
+          <p class="hint">匯出目前所選風格的模型。示意立面保留風格標示；實景成果保留缺面與影像來源記錄。</p>
         </div>
         <p id="selection-message" class="inline-message" role="status"></p>
       </section>
       <section class="jobs-panel" aria-labelledby="jobs-title">
         <div class="section-heading"><h2 id="jobs-title">任務紀錄</h2><button type="button" id="refresh-jobs" class="text-button">重新整理</button></div>
+        <p id="progress-status" class="hint">進度每 3 秒自動更新。</p>
         <div id="jobs"><p class="hint">讀取任務中…</p></div>
       </section>
       <section id="job-detail" class="detail-panel" hidden aria-label="任務詳情"></section>
       <section id="building-detail" class="detail-panel" hidden aria-label="建物資訊"></section>
-      <p class="converter-note" id="converter-note">轉換器尚未啟用</p>
+      <p class="converter-note" id="converter-note">正在確認轉換服務…</p>
     </aside>
     <section class="map-panel" aria-label="E8 建物圖台">
       <div id="map"></div>
       <div class="map-toolbar" aria-label="地圖工具">
-        <div class="view-buttons"><button type="button" id="view-2d" class="active" aria-pressed="true">2D</button><button type="button" id="view-3d" aria-pressed="false" title="未貼皮建物顯示不透明白模，處理狀態以屋頂輪廓標示">3D</button></div>
+        <div class="view-buttons"><button type="button" id="view-2d" aria-pressed="false">2D</button><button type="button" id="view-3d" class="active" aria-pressed="true" title="先顯示白模，再由近到遠載入貼皮；處理狀態以屋頂輪廓標示">3D</button></div>
         <button type="button" id="home">淡江大橋</button>
       </div>
       <div id="map-loading" class="map-notice" role="status">正在載入 E8 圖台…</div>
@@ -86,11 +97,11 @@ header('X-Content-Type-Options: nosniff');
           <span><i class="failed"></i>處理失敗</span>
           <span><i class="completed"></i>已有成果</span>
         </div>
-        <span id="visible-count" class="hint">建物依目前視野載入</span>
+        <div><span id="visible-count" class="hint">建物依目前視野載入</span><div id="model-progress" class="hint" role="status"></div></div>
       </footer>
     </section>
   </main>
   <script src="https://3wa.tw/inc/javascript/easymap8/easymap.js"></script>
-  <script type="module" src="assets/app.mjs"></script>
+  <script type="module" src="assets/app.mjs?v=bounded-preview-1"></script>
 </body>
 </html>

@@ -1,12 +1,17 @@
-import {MapWorkspace} from './map.mjs';
+import {MapWorkspace} from './map.mjs?v=bounded-preview-1';
 import {qualityNotices} from './model-quality.mjs';
 
 const $ = id => document.getElementById(id);
 const modes = {task: {polygon: null, collection: null}, export: {polygon: null, collection: null}};
-const LABELS = {queued: '排隊中', preparing: '前置建檔中', awaiting_converter: '待轉換', partial: '部分貼皮', completed: '已完成', failed: '失敗', cancelled: '已取消', unprocessed: '未處理', prepared: '待轉換'};
+const LABELS = {queued: '排隊中', preparing: '處理中', awaiting_converter: '待實景轉換', partial: '部分貼皮', completed: '已完成', failed: '失敗', cancelled: '已取消', unprocessed: '未處理', prepared: '待轉換'};
 let mode = 'task', meta, map, mapReady = false, selectionVersion = 0, activeJob = null, inspectedJob = null;
 let viewRequest, viewTimer, jobsBusy = false, selectionBusy = false, operationBusy = false;
 let inspectedItems = [];
+let recipeKey = 'procedural-tw-v1';
+let jobRequestVersion = 0;
+let jobsVersion = 0, progressBusy = false, progressMapAt = 0, progressMapDirty = false;
+const jobsCache = new Map();
+const recipeLabel = key => meta?.recipes?.[key]?.label ?? ({'procedural-tw-v1':'台灣街區','procedural-modern-v1':'現代簡約','procedural-pastel-v1':'粉彩插畫','texture-v1':'實景貼皮'}[key] ?? key);
 const number = n => Number(n ?? 0).toLocaleString('zh-TW');
 const area = n => n >= 1e6 ? `${(n / 1e6).toFixed(2)} km²` : `${number(Math.round(n))} m²`;
 const date = value => new Date(/Z$|[+-]\d\d:\d\d$/.test(value) ? value : value + 'Z').toLocaleString('zh-TW', {hour12: false});
@@ -21,11 +26,12 @@ function message(text, error = false, target = 'selection-message') {
 async function api(action, {body, signal, params = {}} = {}) {
   const url = new URL('api.php', location.href);
   url.searchParams.set('action', action);
+  url.searchParams.set('recipe_key', recipeKey);
   for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value);
   const response = await fetch(url, {
     method: body ? 'POST' : 'GET', signal, credentials: 'same-origin',
     headers: body ? {'Content-Type': 'application/json', 'X-CSRF-Token': meta?.csrf_token ?? ''} : {},
-    body: body ? JSON.stringify(body) : undefined,
+    body: body ? JSON.stringify({recipe_key: recipeKey, ...body}) : undefined,
   });
   if (response.status === 401) { location.assign('login.php'); throw new Error('登入已逾時，請重新登入。'); }
   if (action === 'export' && response.ok) return response;
@@ -49,6 +55,8 @@ function updateControls() {
   $('download').disabled = $('create-job').disabled;
   $('draw').disabled = !mapReady || selectionBusy || operationBusy || Boolean(map?.vertices);
   $('resume-selection').hidden = !inspectedJob;
+  $('recipe-key').disabled = selectionBusy || operationBusy || Boolean(map?.vertices);
+  for (const button of document.querySelectorAll('[data-run]')) button.disabled=operationBusy || selectionBusy;
   $('mode-title').textContent = inspectedJob ? '檢視任務範圍' : mode === 'task' ? '建立處理範圍' : '框選匯出範圍';
   $('mode-hint').textContent = inspectedJob ? `目前顯示「${inspectedJob.name}」；返回目前框選後，才能建立任務或匯出。` : mode === 'task' ? '在地圖上畫 Polygon，選取要製作貼圖的建物。' : '重新畫 Polygon，匯出這個範圍的建物與已有成果。';
 }
@@ -80,6 +88,7 @@ function switchMode(next) {
   message('');
   if (mapReady) map.setSelection(modes[mode].polygon);
   updateControls();
+  if (mapReady && modes[mode].polygon && !modes[mode].collection) selectPolygon(modes[mode].polygon);
 }
 
 function drawState(active) {
@@ -134,7 +143,7 @@ async function loadView() {
     return;
   }
   try {
-    const result = await api('buildings', {params: {bbox: map.bounds().join(','), limit: 2000}, signal});
+    const result = await api('buildings', {params: {bbox: map.bounds().join(','), limit: 2000, detail: 'preview'}, signal});
     if (signal.aborted) return;
     map.setBuildings(result);
     $('visible-count').textContent = `目前載入 ${number(result.features.length)} 棟${result.meta.truncated ? '（已達上限）' : ''}`;
@@ -149,24 +158,63 @@ async function loadView() {
 
 function scheduleView() { clearTimeout(viewTimer); viewTimer = setTimeout(loadView, 200); }
 
+function updateRecipeDescription() {
+  const recipe=meta?.recipes?.[recipeKey];
+  $('recipe-key').value=recipeKey;
+  $('recipe-description').textContent=recipe?.description ?? '';
+  $('appearance-badge').textContent=recipeKey==='texture-v1' ? '實景照片 · 依成果保留品質說明' : '示意立面 · 非實景照片';
+}
+
+async function changeRecipe(key) {
+  if (selectionBusy || operationBusy) return;
+  recipeKey=key; updateRecipeDescription();
+  ++jobRequestVersion;
+  viewRequest?.abort(); ++selectionVersion;
+  inspectedJob=null; activeJob=null;
+  $('job-detail').hidden=true; $('building-detail').hidden=true;
+  for (const current of Object.values(modes)) current.collection=null;
+  map?.setBuildings({type:'FeatureCollection',features:[]});
+  if (mapReady) map.setSelection(modes[mode].polygon);
+  message(`已切換為${recipeLabel(recipeKey)}，地圖與匯出使用此風格。`);
+  updateControls(); scheduleView();
+  if (modes[mode].polygon && mapReady) await selectPolygon(modes[mode].polygon);
+}
+$('recipe-key').onchange = () => changeRecipe($('recipe-key').value);
+
+function jobActions(job) {
+  return `<button type="button" class="text-button" data-job="${job.id}">範圍與詳情</button>${job.recipe_key?.startsWith('procedural-') && ['queued','preparing'].includes(job.status) ? `<button type="button" class="text-button" data-run="${job.id}" ${operationBusy || selectionBusy ? 'disabled' : ''}>立即處理一批</button>` : ''}${['queued', 'preparing', 'awaiting_converter', 'partial'].includes(job.status) ? `<button type="button" class="text-button" data-cancel="${job.id}">取消任務</button>` : ''}${['failed', 'cancelled', 'partial'].includes(job.status) ? `<button type="button" class="text-button" data-retry="${job.id}">重試任務</button>` : ''}`;
+}
+
+function completedLabel(job) {
+  return `${number(job.completed)} / ${number(job.total)}（${job.total ? Math.floor(job.completed / job.total * 100) : 0}%）`;
+}
+
+function remainingLabel(job) {
+  const queued=job.queued ?? Math.max(0,job.total-job.prepared-job.failed);
+  return `${job.status==='cancelled' ? '已停止' : '待處理'} ${number(queued)} 棟 · 失敗 ${number(job.failed)} 棟${job.partial ? ` · 部分貼皮 ${number(job.partial)} 棟` : ''}`;
+}
+
 function jobMarkup(job) {
-  return `<article class="job">
+  return `<article class="job" data-job-card="${job.id}">
     <div class="job-heading"><button type="button" class="job-link" data-job="${job.id}">${escape(job.name)}</button><span class="status ${job.status}">${LABELS[job.status] ?? job.status}</span></div>
-    <p class="job-meta">${area(job.area_m2)} · ${number(job.total)} 棟 · ${escape(date(job.created_at))}</p>
-    <div class="progress-label"><span>前置建檔</span><span>${number(job.prepared)} / ${number(job.total)}</span></div>
-    <progress max="${Math.max(1, job.total)}" value="${job.prepared}" aria-label="前置建檔進度"></progress>
-    <div class="progress-label"><span>貼皮成果</span><span>${number(job.completed)} / ${number(job.total)}</span></div>
-    <progress max="${Math.max(1, job.total)}" value="${job.completed}" aria-label="貼皮成果進度"></progress>
-    ${job.partial ? `<p class="hint">部分貼皮 ${number(job.partial)} 棟，仍有缺面。</p>` : ''}
-    <div class="job-actions"><button type="button" class="text-button" data-job="${job.id}">範圍與詳情</button>${['queued', 'preparing', 'awaiting_converter', 'partial'].includes(job.status) ? `<button type="button" class="text-button" data-cancel="${job.id}">取消任務</button>` : ''}${['failed', 'cancelled', 'partial'].includes(job.status) ? `<button type="button" class="text-button" data-retry="${job.id}">重試任務</button>` : ''}</div>
+    <p class="job-meta">${escape(recipeLabel(job.recipe_key ?? 'texture-v1'))} · ${area(job.area_m2)} · ${number(job.total)} 棟 · ${escape(date(job.created_at))}</p>
+    <div class="progress-label"><span>前置建檔</span><span data-count="prepared">${number(job.prepared)} / ${number(job.total)}</span></div>
+    <progress data-bar="prepared" max="${Math.max(1, job.total)}" value="${job.prepared}" aria-label="前置建檔進度"></progress>
+    <div class="progress-label"><span>貼皮成果</span><span data-count="completed">${completedLabel(job)}</span></div>
+    <progress data-bar="completed" max="${Math.max(1, job.total)}" value="${job.completed}" aria-label="貼皮成果進度"></progress>
+    <p class="hint" data-count="remaining">${remainingLabel(job)}</p>
+    <div class="job-actions">${jobActions(job)}</div>
   </article>`;
 }
 
 async function loadJobs({refreshMap = false} = {}) {
   if (jobsBusy) return;
   jobsBusy = true;
+  ++jobsVersion;
   try {
     const jobs = await api('jobs');
+    jobsCache.clear();
+    for (const job of jobs) jobsCache.set(job.id,job);
     $('jobs').innerHTML = jobs.length ? jobs.map(jobMarkup).join('') : '<p class="hint">尚無任務。畫出第一個範圍，開始累積建物成果。</p>';
     if (activeJob) await showJob(activeJob, false);
     if (refreshMap) scheduleView();
@@ -174,28 +222,85 @@ async function loadJobs({refreshMap = false} = {}) {
   finally { jobsBusy = false; }
 }
 
+async function pollProgress() {
+  if (document.hidden || jobsBusy || progressBusy) return;
+  progressBusy=true;
+  const version=jobsVersion;
+  try {
+    const progress=await api('progress');
+    if (version!==jobsVersion) return;
+    if (progress.jobs.length!==jobsCache.size || progress.jobs.some(job=>!jobsCache.has(job.id))) {
+      await loadJobs();
+      return;
+    }
+    let modelsChanged=false;
+    for (const row of progress.jobs) {
+      const previous=jobsCache.get(row.id), job={...previous,...row};
+      const card=$('jobs').querySelector(`[data-job-card="${job.id}"]`);
+      if (!card) continue;
+      modelsChanged ||= previous.completed!==job.completed || previous.partial!==job.partial;
+      card.querySelector('[data-count="prepared"]').textContent=`${number(job.prepared)} / ${number(job.total)}`;
+      card.querySelector('[data-count="completed"]').textContent=completedLabel(job);
+      card.querySelector('[data-count="remaining"]').textContent=remainingLabel(job);
+      card.querySelector('[data-bar="prepared"]').value=job.prepared;
+      card.querySelector('[data-bar="completed"]').value=job.completed;
+      const status=card.querySelector('.status');
+      status.textContent=LABELS[job.status] ?? job.status;
+      status.className=`status ${job.status}`;
+      if (previous.status!==job.status) card.querySelector('.job-actions').innerHTML=jobActions(job);
+      jobsCache.set(job.id,job);
+      if (inspectedJob?.id===job.id) inspectedJob={...inspectedJob,...row};
+      if (activeJob===job.id) {
+        const values={status:LABELS[job.status] ?? job.status,completed:completedLabel(job),failed:`${number(job.failed)} 棟`,skipped:`${number(job.skipped)} 棟`,updated_at:date(job.updated_at)};
+        for (const [key,value] of Object.entries(values)) {
+          const node=$('job-detail').querySelector(`[data-detail="${key}"]`);
+          if (node) node.textContent=value;
+        }
+      }
+    }
+    const pending=progress.jobs.some(job=>['queued','preparing'].includes(job.status));
+    message(`${progress.worker_running ? '背景轉換中' : pending ? '等待下一批自動處理' : '進度已更新'} · ${new Date(progress.checked_at).toLocaleTimeString('zh-TW',{hour12:false})} · 每 3 秒更新`,false,'progress-status');
+    if (inspectedJob) updateControls();
+    progressMapDirty ||= modelsChanged;
+    if (progressMapDirty && !map?.vertices && Date.now()-progressMapAt>=15000) {
+      progressMapDirty=false; progressMapAt=Date.now(); scheduleView();
+    }
+  } catch (error) {
+    message(`進度更新暫時失敗，稍後自動重試：${error.message}`,true,'progress-status');
+  } finally { progressBusy=false; }
+}
+
 async function showJob(id, locate = true) {
+  const requestVersion=++jobRequestVersion;
   try {
     const job = await api('job', {params: {id}});
+    if (requestVersion!==jobRequestVersion) return;
     activeJob = id;
     $('job-detail').hidden = false;
     inspectedItems = job.items ?? [];
     const rows = inspectedItems.slice(0, 100).map(item => `<tr><td>${item.model ? `<button type="button" class="text-button" data-building="${escape(item.build_id)}" title="定位並查看成果">${escape(item.build_id)}</button>` : escape(item.build_id)}</td><td>${LABELS[item.status] ?? escape(item.status)}</td></tr>`).join('');
     const firstModel = inspectedItems.find(item => item.model);
     $('job-detail').innerHTML = `<h3>${escape(job.name)}</h3><dl>
-      <div><dt>任務狀態</dt><dd>${LABELS[job.status] ?? escape(job.status)}</dd></div>
+      <div><dt>任務狀態</dt><dd data-detail="status">${LABELS[job.status] ?? escape(job.status)}</dd></div>
+      <div><dt>外觀風格</dt><dd>${escape(recipeLabel(job.recipe_key ?? 'texture-v1'))}</dd></div>
       <div><dt>範圍面積</dt><dd>${area(job.area_m2)}</dd></div>
       <div><dt>處理建物</dt><dd>${number(job.total)} 棟</dd></div>
-      <div><dt>已有成果重用</dt><dd>${number(job.skipped)} 棟</dd></div>
+      <div><dt>貼皮成果</dt><dd data-detail="completed">${completedLabel(job)}</dd></div>
+      <div><dt>已有成果重用</dt><dd data-detail="skipped">${number(job.skipped)} 棟</dd></div>
       ${job.partial ? `<div><dt>部分貼皮</dt><dd>${number(job.partial)} 棟</dd></div>` : ''}
-      <div><dt>失敗</dt><dd>${number(job.failed)} 棟</dd></div>
+      <div><dt>失敗</dt><dd data-detail="failed">${number(job.failed)} 棟</dd></div>
       <div><dt>建立時間</dt><dd>${escape(date(job.created_at))}</dd></div>
-      <div><dt>最後更新</dt><dd>${escape(date(job.updated_at))}</dd></div>
+      <div><dt>最後更新</dt><dd data-detail="updated_at">${escape(date(job.updated_at))}</dd></div>
       </dl>${job.error ? `<p class="inline-message error">${escape(job.error)}</p>` : ''}
       ${firstModel ? `<button type="button" class="outline full" data-building="${escape(firstModel.build_id)}">查看已貼圖建物</button>` : ''}
-      <details><summary>建物清單${job.total > 100 ? '（顯示前 100 棟）' : ''}</summary><table><thead><tr><th>Build ID</th><th>狀態</th></tr></thead><tbody>${rows}</tbody></table></details>`;
+      <details><summary>建物清單${job.total > 100 ? '（顯示前 100 棟）' : ''}</summary><button type="button" class="text-button" data-refresh-job="${job.id}">更新建物清單</button><table><thead><tr><th>Build ID</th><th>狀態</th></tr></thead><tbody>${rows}</tbody></table></details>`;
     if (locate && mapReady) {
       if (map.vertices) cancelDraw();
+      if (job.recipe_key && job.recipe_key!==recipeKey) {
+        recipeKey=job.recipe_key; updateRecipeDescription(); viewRequest?.abort(); ++selectionVersion;
+        for (const current of Object.values(modes)) current.collection=null;
+        map.setBuildings({type:'FeatureCollection',features:[]}); scheduleView();
+      }
       inspectedJob = job;
       map.setSelection(job.polygon);
       map.locate(job.polygon);
@@ -208,6 +313,7 @@ async function showJob(id, locate = true) {
 function showBuilding(p) {
   const model = p.model && typeof p.model === 'string' ? JSON.parse(p.model) : p.model;
   const partial = model?.texture_status === 'partial';
+  const synthetic = model?.appearance_kind === 'procedural';
   const notices = qualityNotices(model);
   const credits = (Array.isArray(model?.attribution) ? model.attribution : []).filter(a => a && /^\d+$/.test(a.image_id));
   $('building-detail').hidden = false;
@@ -215,13 +321,15 @@ function showBuilding(p) {
     <div><dt>名稱</dt><dd>${escape(p.name || '—')}</dd></div><div><dt>高度</dt><dd>${p.height_missing ? '尚無有效高度' : `${escape(p.height)} m`}</dd></div>
     <div><dt>成果狀態</dt><dd>${partial ? '部分貼皮' : p.status === 'completed' ? '已有成果' : LABELS[p.status] ?? escape(p.status)}</dd></div>
     ${model?.surfaces_total ? `<div><dt>已貼面數</dt><dd>${number(model.surfaces_textured)} / ${number(model.surfaces_total)}</dd></div>` : ''}</dl>
-    ${partial ? '<p class="hint">部分立面已有真實影像，缺面仍為白模；匯出會保留缺面與影像來源記錄。</p>' : model ? '<p class="hint">切換 3D 可查看實際成果模型。</p>' : '<p class="hint">尚無貼皮成果。3D 模式顯示原始高度白模。</p>'}
+    ${synthetic ? `<p class="hint">${escape(model.style_label ?? recipeLabel(model.style_key))} · 程序化示意立面。輪廓與高度來自建物資料；窗戶、樓層分割與配色為生成外觀。</p>` : partial ? '<p class="hint">部分立面已有真實影像，缺面仍為白模；匯出會保留缺面與影像來源記錄。</p>' : model ? '<p class="hint">切換 3D 可查看實際成果模型。</p>' : '<p class="hint">尚無此風格的成果。3D 模式顯示原始高度白模。</p>'}
     ${notices.length ? `<p class="inline-message error">試轉／待核對：${notices.map(escape).join('；')}。</p>` : ''}
     ${model?.asset_id ? `<a href="viewer.php?asset_id=${encodeURIComponent(model.asset_id)}" target="_blank" rel="noopener">獨立 GLB 預覽</a>` : ''}
     ${credits.length ? `<details><summary>Mapillary 影像來源 · CC BY-SA 4.0</summary>${credits.map(a => `<p><a href="https://www.mapillary.com/app/?pKey=${a.image_id}" target="_blank" rel="noopener">${escape(a.author?.username || a.image_id)}</a></p>`).join('')}<p>影像經立面投影與裁切。<a href="https://creativecommons.org/licenses/by-sa/4.0/" target="_blank" rel="noopener">授權條款</a></p></details>` : ''}`;
 }
 
 $('job-detail').addEventListener('click', event => {
+  const refresh=event.target.closest('[data-refresh-job]');
+  if (refresh) return showJob(refresh.dataset.refreshJob,false);
   const id = event.target.closest('[data-building]')?.dataset.building;
   const item = inspectedItems.find(item => item.build_id === id);
   if (!item?.model || !mapReady) return;
@@ -241,6 +349,7 @@ $('resume-selection').onclick = () => {
   if (modes[mode].polygon) map.locate(modes[mode].polygon);
   message(modes[mode].polygon ? '已返回目前框選範圍。' : '尚未框選範圍，請繪製 Polygon。');
   updateControls();
+  if (modes[mode].polygon && !modes[mode].collection) selectPolygon(modes[mode].polygon);
 };
 $('undo').onclick = () => map.undoDraw();
 $('cancel-draw').onclick = cancelDraw;
@@ -265,7 +374,18 @@ $('refresh-jobs').onclick = () => loadJobs({refreshMap: true});
 $('jobs').addEventListener('click', async event => {
   const button = event.target.closest('button');
   if (!button) return;
+  if (operationBusy || selectionBusy) return;
   if (button.dataset.job) return showJob(button.dataset.job);
+  if (button.dataset.run) {
+    operationBusy=true; button.disabled=true; updateControls();
+    message('正在產生示意立面；完成後切換 3D 查看。');
+    try {
+      const stats=await api('run_batch',{body:{id:button.dataset.run,batch:10}});
+      message(stats.locked ? '背景正在轉換，進度會自動更新。' : `本批完成 ${number(stats.completed)} 棟${stats.failed ? `，失敗 ${number(stats.failed)} 棟，請查看任務詳情` : ''}。剩餘建物將由背景排程接續處理。`,stats.failed>0);
+    } catch (error) { message(error.message,true); }
+    finally { operationBusy=false; updateControls(); await loadJobs({refreshMap:true}); }
+    return;
+  }
   const id = button.dataset.cancel ?? button.dataset.retry;
   if (!id) return;
   button.disabled = true;
@@ -280,7 +400,7 @@ $('task-form').addEventListener('submit', async event => {
   operationBusy = true; updateControls();
   try {
     const job = await api('create_job', {body: {name: $('task-name').value.trim(), polygon: modes.task.polygon, force: $('force').checked}});
-    message(`任務已建立：${number(job.total)} 棟，等待排程處理。`);
+    message(`任務已建立：${number(job.total)} 棟，${recipeKey==='texture-v1' ? '背景排程會準備輸入，實景貼皮仍需 CLI 試轉' : '背景排程會自動轉換，進度每 3 秒更新；可以關閉頁面'}。`);
     activeJob = job.id;
     await loadJobs({refreshMap: true});
   } catch (error) { message(error.message, true); }
@@ -303,15 +423,21 @@ $('download').onclick = async () => {
 async function start() {
   try {
     meta = await api('meta');
-    $('converter-note').textContent = meta.converter_ready ? '轉換器已啟用' : '排程目前僅前置建檔 · 真實貼皮以 CLI 試轉';
+    updateRecipeDescription();
+    $('converter-note').textContent = '示意立面每分鐘自動轉換 · 實景貼皮沿用 CLI 試轉';
     loadJobs();
-    map = new MapWorkspace({onMove: scheduleView, onBuilding: showBuilding, onDraw: count => { $('finish').disabled = count < 3; }, onFinish: finishDraw, onError: text => message(text, true, 'map-message')});
+    setInterval(pollProgress,3000);
+    document.addEventListener('visibilitychange',()=>{ if (!document.hidden) pollProgress(); });
+    map = new MapWorkspace({onMove: scheduleView, onBuilding: showBuilding, onDraw: count => { $('finish').disabled = count < 3; }, onFinish: finishDraw, onError: text => message(text, true, 'map-message'), onModels: ({loaded, total, available}) => {
+      $('model-progress').textContent = map.threeD && available ? `近處貼皮 ${loaded} / ${total} 棟${available > total ? ' · 移動或放大查看其他建物' : ''}` : '';
+    }});
     await map.init(meta.center, meta.zoom);
     mapReady = true;
+    changeView(true);
     $('map-loading').hidden = true;
     updateControls(); scheduleView();
     if (!meta.source.ready) message(meta.source.error ?? '尚未設定建物資料來源。', true, 'map-message');
-    setInterval(() => { if (!document.hidden) loadJobs({refreshMap: true}); }, 15000);
+    pollProgress();
   } catch (error) {
     $('map-loading').textContent = error.message;
     message(error.message, true);

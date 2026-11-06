@@ -84,13 +84,14 @@ function showModel(object, name, info, local = false) {
   fitButton.disabled = rotateButton.disabled = false;
   stage.dataset.loaded = 'true';
   message.classList.remove('error');
-  message.textContent = `${name} · 拖曳旋轉，滾輪縮放。白色部分表示沒有貼圖。`;
+  const synthetic=info?.appearance_kind==='procedural';
+  message.textContent = `${name} · 拖曳旋轉，滾輪縮放。${synthetic ? '示意立面，非實景照片。' : '白色部分表示沒有貼圖。'}`;
   const download = document.getElementById('download-model');
   if (download) download.hidden = local;
   const notices = qualityNotices(info);
   const quality = document.getElementById('viewer-quality');
-  quality.hidden = Boolean(info) && !notices.length;
-  quality.textContent = info ? `試轉／待核對：${notices.join('；')}。` : '此 GLB 未附品質摘要，請另外核對影像來源與對位。';
+  quality.hidden = !synthetic && Boolean(info) && !notices.length;
+  quality.textContent = synthetic ? '程序化示意立面：輪廓與高度來自建物資料，窗格、樓層分割與配色為生成外觀。' : info ? `試轉／待核對：${notices.join('；')}。` : '此 GLB 未附品質摘要，請另外核對影像來源與對位。';
   const credits = document.getElementById('viewer-credits');
   credits.replaceChildren();
   for (const source of Array.isArray(info?.attribution) ? info.attribution : []) {

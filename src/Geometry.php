@@ -132,7 +132,7 @@ final class Geometry
         return false;
     }
 
-    private static function normalizePolygon(array $rings, int &$total, int $limit): array
+    private static function normalizePolygon(array $rings, int &$total, int $limit, bool $deduplicate = false): array
     {
         if (!array_is_list($rings) || $rings === [] || count($rings) > 64) {
             throw new InvalidArgumentException('Polygon 必須包含外環，且環數不可超過 64。');
@@ -148,7 +148,14 @@ final class Geometry
             }
             $points = [];
             foreach ($ring as $point) {
-                $points[] = self::readPoint($point);
+                $point = self::readPoint($point);
+                // 來源輪廓可含零長邊；只移除完全相同的相鄰點，不改變輪廓或內洞。
+                if (!$deduplicate || $points === [] || $points[count($points) - 1] !== $point) {
+                    $points[] = $point;
+                }
+            }
+            if (count($points) < 4) {
+                throw new InvalidArgumentException('每個環至少需要三個頂點與封閉點。');
             }
             if ($points[0] !== $points[count($points) - 1]) {
                 throw new InvalidArgumentException('Polygon 的環必須封閉。');
@@ -400,6 +407,7 @@ final class Geometry
             $position++;
         } while (true);
         self::expectToken($tokens, $position, ')');
-        return self::normalizePolygon($rings, $total, self::MAX_SOURCE_VERTICES);
+        // 僅來源 WKT 去除連續重複點；使用者繪製範圍維持嚴格驗證。
+        return self::normalizePolygon($rings, $total, self::MAX_SOURCE_VERTICES, true);
     }
 }

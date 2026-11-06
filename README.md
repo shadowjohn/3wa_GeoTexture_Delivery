@@ -4,9 +4,21 @@ E8 建物貼皮交付工作站。PHP 網站、SQLite 任務與帳號庫，不需
 
 目前完成的流程：登入 → E8 新北建物圖台 → 畫 Polygon → 建立任務 → 排程分批準備建物 → 另畫 Polygon 匯出成果包。
 
-已接入 orthofacade 的單棟 CLI 試轉、Mapillary 真實影像及內嵌貼圖 GLB；目前仍在核對影像與建物的對位品質。worker 只準備轉換輸入，尚未自動呼叫試轉器。部分貼皮會保留缺面與品質警示，不算全棟完成。
+已接入 orthofacade 的單棟 CLI 試轉、Mapillary 真實影像及內嵌貼圖 GLB；目前仍在核對影像與建物的對位品質。實景配方的 worker 只準備轉換輸入，尚未自動呼叫試轉器；程序化配方可直接產生 GLB。部分貼皮會保留缺面與品質警示，不算全棟完成。
 
 公司續接請先讀 [單棟牆角校準交接](docs/calibration-next.md)；已保存單張原始全景與安全診斷資料包，可離線重現問題。單棟校準尚未完成。
+
+## 程序化立面（2026-11-06）
+
+已加入台灣街區、現代簡約、粉彩插畫三種示意風格。選風格、框選建立任務後，背景排程會自動生成真實輪廓與高度的 GLB，AJAX 每 3 秒更新進度；也可按「立即處理一批」執行最多 10 棟。實景貼皮流程保留，品質標示與示意立面分開。
+
+首頁預設 3D，先顯示白模，再由近到遠分批載入貼皮。桌機最多常駐 64 棟貼皮、手機 24 棟，移動視野會替換近處模型；完整匯出不受預覽數量限制。地圖採精簡品質摘要，模型保留 SHA-256 驗證及登入後的 ETag 重新驗證。
+
+部署入口為 [建物貼片機](https://3wa.tw/demo/php/map/map_building_skin/)，舊 `map_build_skin` 入口以 HTTP 308 轉址。正式帳號與資料保留。
+
+新北來源預設為私有 `db/F_新北建物8418.db`；部署使用符號連結指向既有圖資，程式唯讀開啟。來源可繼續由 `GEOTEXTURE_SOURCE_DB` 覆寫。
+
+依賴安裝、新風格擴充及使用限制見 [程序化風格指南](docs/procedural-styles.md)。以下實景試轉、校準紀錄仍適用於 `texture-v1` 配方。
 
 ## 本機啟動
 
@@ -24,7 +36,7 @@ Linux：
 sh run.sh
 ```
 
-開啟 [本機工作站](http://127.0.0.1:8088)。初始帳號／密碼為 `admin`／`admin`，搭配 GD 圖片驗證碼。登入後的「帳號設定」可修改密碼，變更後需重新登入。
+開啟 [本機工作站](http://127.0.0.1:8088)。初始帳號／密碼為 `admin`／`admin`，搭配 GD 圖片驗證碼。登入後的「帳號設定」可修改密碼，變更後其他舊登入立即失效，目前登入維持；所有登入最長 12 小時。
 
 這次工作區外層另有建物資料，Git repository 實際在 `D:\mytools\3wa_GeoTexture_Delivery\3wa_GeoTexture_Delivery`；請在有 `run.bat` 的這一層啟動。
 
@@ -43,7 +55,7 @@ snapshot/              介面參考與驗證截圖
 tests/                 不依賴正式圖資的暫存 fixture 測試
 ```
 
-來源預設 `../建物資料/F_新北建物8418.db`（唯讀、不複製、不提交 Git）。資料包含 460,840 棟，非空且唯一的 `build_id`、WGS84 WKT、建物高度與 R-tree。
+來源預設 `db/F_新北建物8418.db`（唯讀、不複製、不提交 Git）。資料包含 460,840 棟，非空且唯一的 `build_id`、WGS84 WKT、建物高度與 R-tree。
 
 可由環境變數覆寫路徑，例如：
 
@@ -70,29 +82,22 @@ php -S 127.0.0.1:8088 -t public
 先手動執行一批：
 
 ```sh
-php cli/worker.php --batch=100
+php cli/worker.php --batch=100 --time-budget=45
 ```
 
-每次最多處理指定筆數，立即結束；檔案鎖避免同時執行。輸出 JSON 統計，錯誤回傳非零 exit code。建檔完成會變為 `awaiting_converter`，貼皮完成仍是 0。
+每次最多處理指定筆數，立即結束；檔案鎖避免同時執行。輸出 JSON 統計，錯誤回傳非零 exit code。實景配方建檔完成會變為 `awaiting_converter`，貼皮完成仍是 0；程序化配方則會產生、驗證及登錄 GLB。
 
-Linux 部署示例（由管理員設定，這次沒有實際安裝系統排程）：
-
-```sh
-sudo install -d -o www-data -g www-data -m 0770 /srv/geotexture/db
-sudo chown -R www-data:www-data /srv/geotexture/db
-sudo chmod -R u+rwX,g+rwX,o-rwx /srv/geotexture/db
-sudo -u www-data crontab -e
-```
-
-crontab 內容：
+正式站已安裝 john 的每分鐘 cron（2026-11-06），沿用既有 worker 鎖，與網頁手動批次互斥。每批最多 100 棟，45 秒後不再啟動下一棟；單棟仍可完成後再結束。頁面用 AJAX 每 3 秒讀取精簡進度，關閉頁面不影響轉換。
 
 ```cron
-* * * * * cd /srv/geotexture && umask 0027 && /usr/bin/php cli/worker.php --batch=100 >> db/worker.log 2>&1
+* * * * * cd /var/www/html/demo/php/map/map_building_skin && /usr/bin/php cli/worker.php --batch=100 --time-budget=45 >> /home/john/logs/map-building-skin-worker.log 2>&1
 ```
+
+用 `crontab -l` 檢查排程；日誌每批輸出 UTC 起訖時間與處理／完成／失敗數。移除 crontab 中 `BEGIN map_building_skin worker` 到 `END map_building_skin worker` 區塊即可停止後續自動批次。資料目錄沿用 john 與 www-data 的具名 ACL，共用 SQLite、鎖及成果存取。
 
 Windows 可用工作排程器呼叫 `php.exe`，引數 `cli/worker.php --batch=100`，起始位置設為 repository。IIS 的 App Pool 身分需具有 `db/` 修改權限；來源圖資僅需讀取。網站根目錄設定 `public/`，PHP FastCGI 由既有環境提供。`public/web.config` 已加入 `.mjs` MIME type。
 
-`.htaccess` 需 Apache 允許對應的 `AllowOverride`；IIS 設定需有 URL Authorization／Request Filtering 支援。`public/` 作為網站根目錄時，`db/` 本身就在站台之外。部署後仍應實測 SQLite URL 取得 403／404；本次未部署正式 Apache／IIS。
+`.htaccess` 需 Apache 允許對應的 `AllowOverride`；IIS 設定需有 URL Authorization／Request Filtering 支援。`public/` 作為網站根目錄時，`db/` 本身就在站台之外。部署後仍應實測 SQLite URL 取得 403／404；本次 Apache 部署已確認私有路徑回傳 403。
 
 ## 單棟貼皮試轉
 

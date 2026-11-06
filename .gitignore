@@ -2,6 +2,7 @@
 /vendor/orthofacade/
 /.venv-orthofacade/
 /.venv-calibration/
+/.venv-procedural/
 __pycache__/
 /db/*
 !/db/.htaccess
@@ -13,3 +14,5 @@ __pycache__/
 *.zip
 .env
 .superpowers/
+/.playwright-cli/
+/output/playwright/

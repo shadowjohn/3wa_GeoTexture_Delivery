@@ -1,0 +1,10 @@
+Options -Indexes
+DirectoryIndex index.php
+RewriteEngine On
+
+# Only public endpoints and assets are exposed at this deployment URL.
+RewriteRule ^$ public/index.php [END]
+RewriteRule ^(index|login|logout|account|captcha|api|viewer)\.php$ public/$1.php [END]
+RewriteRule ^assets/(.*)$ public/assets/$1 [END]
+RewriteRule ^public(?:/|$) - [L]
+RewriteRule ^ - [F]

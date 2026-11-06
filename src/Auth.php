@@ -14,11 +14,16 @@ final class Auth {
         if (!is_dir($stateDir) && !mkdir($stateDir, 0775, true) && !is_dir($stateDir)) {
             throw new RuntimeException('無法建立登入資料目錄。');
         }
-        $this->db = new PDO('sqlite:' . rtrim($stateDir, '/\\') . '/app.sqlite', null, null, [
+        $dbPath=rtrim($stateDir, '/\\') . '/app.sqlite';
+        // SQLite journal/WAL 繼承主檔 mode；共用群組/ACL 需能由 CLI 與網站輪流寫入。
+        // 另一個執行帳號無法 chmod 已存在的檔案，沿用擁有者設定的 0660 即可。
+        if (is_file($dbPath)) { @chmod($dbPath,0660); }
+        $this->db = new PDO('sqlite:' . $dbPath, null, null, [
             PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
             PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
             PDO::ATTR_TIMEOUT => 5,
         ]);
+        @chmod($dbPath,0660);
         // 初始帳號只隨新 users 表建立，避免重啟時覆蓋既有帳號或密碼。
         $this->db->exec('BEGIN IMMEDIATE');
         try {
@@ -66,10 +71,18 @@ final class Auth {
         self::startSession();
         $id = $_SESSION['auth_user_id'] ?? null;
         if (!is_int($id) || $id < 1) { return null; }
-        $statement = $this->db->prepare('SELECT id,username FROM users WHERE id=?');
+        $statement = $this->db->prepare('SELECT id,username,password_hash FROM users WHERE id=?');
         $statement->execute([$id]);
         $user = $statement->fetch();
-        return $user === false ? null : ['id' => (int)$user['id'], 'username' => $user['username']];
+        $version=$_SESSION['auth_password_version'] ?? null;
+        $started=$_SESSION['auth_started_at'] ?? null;
+        // 每次請求比對伺服器上的密碼版本；變更或重設密碼後，其他登入立即失效。
+        if ($user===false || !is_string($version) || !hash_equals(hash('sha256',$user['password_hash']),$version)
+            || !is_int($started) || $started>time() || time()-$started>=43200) {
+            unset($_SESSION['auth_user_id'],$_SESSION['auth_password_version'],$_SESSION['auth_started_at'],$_SESSION['csrf_token']);
+            return null;
+        }
+        return ['id' => (int)$user['id'], 'username' => $user['username']];
     }
 
     public function requireLogin(): array {
@@ -139,6 +152,8 @@ final class Auth {
         }
         session_regenerate_id(true);
         $_SESSION['auth_user_id'] = (int)$user['id'];
+        $_SESSION['auth_password_version'] = hash('sha256',$user['password_hash']);
+        $_SESSION['auth_started_at'] = time();
         unset($_SESSION['csrf_token']);
         $this->db->prepare('DELETE FROM login_attempts WHERE client_key=?')->execute([$client]);
         return true;
@@ -149,14 +164,21 @@ final class Auth {
         if ($user === null) { throw new RuntimeException('請先登入再修改密碼。'); }
         $statement = $this->db->prepare('SELECT password_hash FROM users WHERE id=?');
         $statement->execute([$user['id']]);
-        if (strlen($current) > 72 || !password_verify($current, (string)$statement->fetchColumn())) {
+        $previousHash=(string)$statement->fetchColumn();
+        if (strlen($current) > 72 || !password_verify($current, $previousHash)) {
             throw new InvalidArgumentException('目前密碼不正確。');
         }
         if ($new !== $confirm) { throw new InvalidArgumentException('新密碼與確認密碼不一致。'); }
         if (preg_match_all('/./us', $new) < 8) { throw new InvalidArgumentException('新密碼至少需要 8 個字元。'); }
         if (strlen($new) > 72) { throw new InvalidArgumentException('新密碼不可超過 72 位元組。'); }
-        $this->db->prepare('UPDATE users SET password_hash=? WHERE id=?')->execute([password_hash($new, PASSWORD_DEFAULT), $user['id']]);
+        if (str_contains($new,"\0")) { throw new InvalidArgumentException('新密碼不可包含空字元。'); }
+        $newHash=password_hash($new, PASSWORD_DEFAULT);
+        $update=$this->db->prepare('UPDATE users SET password_hash=? WHERE id=? AND password_hash=?');
+        $update->execute([$newHash,$user['id'],$previousHash]);
+        if ($update->rowCount()!==1) { throw new RuntimeException('密碼已在其他連線變更，請重新登入。'); }
         session_regenerate_id(true);
+        $_SESSION['auth_password_version'] = hash('sha256',$newHash);
+        $_SESSION['auth_started_at'] = time();
         unset($_SESSION['csrf_token']);
     }
 

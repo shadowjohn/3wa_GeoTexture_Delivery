@@ -25,14 +25,14 @@ try {
     session_write_close();
     $action = $_GET['action'] ?? 'meta';
     $method = $_SERVER['REQUEST_METHOD'] ?? 'GET';
-    $postActions = ['selection','create_job','cancel_job','retry_job','export'];
-    $getActions = ['meta','buildings','jobs','job','model'];
+    $postActions = ['selection','create_job','cancel_job','retry_job','export','run_batch'];
+    $getActions = ['meta','buildings','jobs','job','model','progress'];
     if (!is_string($action) || !in_array($action,array_merge($postActions,$getActions),true)) { throw new AppException('找不到 API action',404); }
     $expected = in_array($action,$postActions,true) ? 'POST' : 'GET';
     if ($method!==$expected) { header('Allow: '.$expected); throw new AppException('此 action 必須使用 '.$expected,405); }
     $input = [];
     if ($method==='POST') {
-        if (in_array($action,['create_job','cancel_job','retry_job'],true)) {
+        if (in_array($action,['create_job','cancel_job','retry_job','run_batch'],true)) {
             $provided = $_SERVER['HTTP_X_CSRF_TOKEN'] ?? '';
             if (!is_string($provided) || !hash_equals($csrfToken,$provided)) { throw new AppException('CSRF token 無效，請重新載入頁面',403); }
         }
@@ -42,7 +42,9 @@ try {
         catch (JsonException) { throw new AppException('請提供有效的 JSON object',400); }
         if (!is_array($input) || array_is_list($input)) { throw new AppException('請提供 JSON object',400); }
     }
-    $app=geoTextureApp();
+    $recipe=$input['recipe_key'] ?? $_GET['recipe_key'] ?? \GeoTexture\appConfig()['recipe_key'];
+    if (!is_string($recipe)) { throw new InvalidArgumentException('外觀風格必須是字串'); }
+    $app=\GeoTexture\createApp(['recipe_key'=>\GeoTexture\Recipes::validate($recipe)]);
     $polygon=static function () use ($input): array {
         if (!isset($input['polygon']) || !is_array($input['polygon'])) { throw new InvalidArgumentException('缺少 GeoJSON Polygon'); }
         return $input['polygon'];
@@ -63,9 +65,10 @@ try {
             foreach ($parts as $part) { if (!is_numeric($part) || !is_finite((float)$part)) { throw new InvalidArgumentException('bbox 含無效數值'); } }
             $limit=filter_var($_GET['limit'] ?? '2000',FILTER_VALIDATE_INT);
             if ($limit===false) { throw new InvalidArgumentException('limit 必須為整數'); }
-            respondJson(['data'=>$app->buildings(array_map('floatval',$parts),$limit)]);
+            respondJson(['data'=>$app->buildings(array_map('floatval',$parts),$limit,($_GET['detail'] ?? '')==='preview')]);
         case 'selection': respondJson(['data'=>$app->selection($polygon())]);
         case 'jobs': respondJson(['data'=>$app->jobs()]);
+        case 'progress': respondJson(['data'=>$app->progress()]);
         case 'job': respondJson(['data'=>$app->job($id())]);
         case 'create_job':
             if (!isset($input['name']) || !is_string($input['name'])) { throw new InvalidArgumentException('任務名稱必須是字串'); }
@@ -73,6 +76,13 @@ try {
             respondJson(['data'=>$app->createJob($input['name'],$polygon(),$input['force'] ?? false)],201);
         case 'cancel_job': respondJson(['data'=>$app->cancelJob($id())]);
         case 'retry_job': respondJson(['data'=>$app->retryJob($id())]);
+        case 'run_batch':
+            $batch=$input['batch'] ?? 10;
+            if (!is_int($batch) || $batch<1 || $batch>10) { throw new InvalidArgumentException('網頁每批可產生 1 至 10 棟'); }
+            $jobId=$id();
+            $job=$app->job($jobId,false);
+            if (!\GeoTexture\Recipes::procedural($job['recipe_key'])) { throw new InvalidArgumentException('實景任務請使用原有 CLI 試轉流程'); }
+            respondJson(['data'=>$app->runBatch($batch,$jobId,15)]);
         case 'export':
             $path=$app->export($polygon());
             header('Content-Type: application/zip');
@@ -83,10 +93,14 @@ try {
         case 'model':
             if (!isset($_GET['asset_id']) || !is_string($_GET['asset_id'])) { throw new InvalidArgumentException('缺少 asset_id'); }
             $file=$app->modelFile($_GET['asset_id']);
+            $etag='"'.$file['sha256'].'"';
+            // 私人瀏覽器快取每次仍須通過登入與檔案驗證；相同模型只回 304。
+            header('Cache-Control: private, no-cache');
+            header('ETag: '.$etag);
+            if (trim($_SERVER['HTTP_IF_NONE_MATCH'] ?? '')===$etag) { http_response_code(304); exit; }
             header('Content-Type: model/gltf-binary');
             header('Content-Disposition: inline; filename="'.$file['name'].'"');
             header('Content-Length: '.filesize($file['path']));
-            header('ETag: "'.$file['sha256'].'"');
             readfile($file['path']);
             exit;
     }

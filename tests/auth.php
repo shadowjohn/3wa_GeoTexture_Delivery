@@ -48,13 +48,29 @@ try {
     check(session_id() !== $oldSession, '登入成功必須更新 session ID');
     check($auth->currentUser()['username'] === 'admin', '登入後可取得帳號');
     $db = new PDO('sqlite:' . $tmp . '/app.sqlite');
+    if (PHP_OS_FAMILY!=='Windows') {
+        clearstatcache(true,$tmp.'/app.sqlite');
+        check((fileperms($tmp.'/app.sqlite') & 0777)===0660, '帳號庫需允許共用群組寫入且禁止其他使用者讀取');
+    }
     $hash = $db->query("SELECT password_hash FROM users WHERE username='admin'")->fetchColumn();
     check($hash !== 'admin' && password_verify('admin', $hash), '資料庫只能保存密碼雜湊');
     rejects(fn() => $auth->changePassword('wrong', 'Changed123!', 'Changed123!'), '改密碼必須核對目前密碼');
     rejects(fn() => $auth->changePassword('admin', 'short', 'short'), '新密碼不可少於八字');
     rejects(fn() => $auth->changePassword('admin', 'Changed123!', 'different'), '新密碼與確認必須相同');
+    $previousLogin = $_SESSION;
     $auth->changePassword('admin', 'Changed123!', 'Changed123!');
     check($auth->currentUser()['username'] === 'admin', '改密碼後維持目前登入');
+    $currentLogin = $_SESSION;
+    $_SESSION = $previousLogin;
+    check($auth->currentUser() === null, '改密碼後其他舊登入必須立即失效');
+    $_SESSION = $currentLogin;
+    unset($_SESSION['auth_password_version']);
+    check($auth->currentUser() === null, '舊版未綁定密碼版本的登入必須重新認證');
+    $_SESSION = $currentLogin;
+    $_SESSION['auth_started_at'] = time() - 43201;
+    check($auth->currentUser() === null, '登入超過十二小時必須重新認證');
+    $_SESSION = $currentLogin;
+    rejects(fn() => $auth->changePassword('Changed123!', "HasNull\0Password", "HasNull\0Password"), '密碼空字元需拒絕');
     $auth->logout();
     check($auth->currentUser() === null && !Auth::checkCsrf($token), '登出清除登入狀態及原 CSRF token');
     Auth::startSession();
